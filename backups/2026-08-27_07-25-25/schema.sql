@@ -58,6 +58,13 @@ CREATE EXTENSION IF NOT EXISTS "pgjwt" WITH SCHEMA "extensions";
 
 
 
+CREATE EXTENSION IF NOT EXISTS "postgres_fdw" WITH SCHEMA "public";
+
+
+
+
+
+
 CREATE EXTENSION IF NOT EXISTS "supabase_vault" WITH SCHEMA "vault";
 
 
@@ -259,12 +266,47 @@ SET default_tablespace = '';
 SET default_table_access_method = "heap";
 
 
-CREATE TABLE IF NOT EXISTS "public"."batiments" (
+CREATE TABLE IF NOT EXISTS "public"."building_plans" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "building_id" "uuid",
+    "name" "text",
+    "image_url" "text",
+    "created_by" "uuid",
+    "updated_by" "uuid",
+    "type" "text",
+    "sort_order" bigint
+);
+
+
+ALTER TABLE "public"."building_plans" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."building_plans" IS 'Plans des bâtiments';
+
+
+
+COMMENT ON COLUMN "public"."building_plans"."id" IS 'Identifiant unique du plan';
+
+
+
+COMMENT ON COLUMN "public"."building_plans"."building_id" IS 'Identifiant du bâtiment auquel le plan appartient';
+
+
+
+COMMENT ON COLUMN "public"."building_plans"."name" IS 'Nom du plan';
+
+
+
+COMMENT ON COLUMN "public"."building_plans"."image_url" IS 'URL de l''image du plan';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."buildings" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "site_id" "uuid",
-    "nom" "text" NOT NULL,
-    "usage_actuel" "text",
-    "historique" "text",
+    "name" "text" NOT NULL,
+    "current_use" "text",
+    "history" "text",
     "project_id" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
@@ -272,46 +314,46 @@ CREATE TABLE IF NOT EXISTS "public"."batiments" (
 );
 
 
-ALTER TABLE "public"."batiments" OWNER TO "postgres";
+ALTER TABLE "public"."buildings" OWNER TO "postgres";
 
 
-COMMENT ON TABLE "public"."batiments" IS 'Bâtiment et ses informations';
-
-
-
-COMMENT ON COLUMN "public"."batiments"."id" IS 'identifiant unique du bâtiment';
+COMMENT ON TABLE "public"."buildings" IS 'Bâtiment et ses informations';
 
 
 
-COMMENT ON COLUMN "public"."batiments"."site_id" IS 'identifiant du site auquel appartient le bâtiment';
+COMMENT ON COLUMN "public"."buildings"."id" IS 'identifiant unique du bâtiment';
 
 
 
-COMMENT ON COLUMN "public"."batiments"."nom" IS 'Nom du bâtiment';
+COMMENT ON COLUMN "public"."buildings"."site_id" IS 'identifiant du site auquel appartient le bâtiment';
 
 
 
-COMMENT ON COLUMN "public"."batiments"."usage_actuel" IS 'Usage actuel du bâtiment';
+COMMENT ON COLUMN "public"."buildings"."name" IS 'Nom du bâtiment';
 
 
 
-COMMENT ON COLUMN "public"."batiments"."historique" IS 'Historique du bâtiment';
+COMMENT ON COLUMN "public"."buildings"."current_use" IS 'Usage actuel du bâtiment';
 
 
 
-COMMENT ON COLUMN "public"."batiments"."project_id" IS 'Projet auquel appartient le bâtiment';
+COMMENT ON COLUMN "public"."buildings"."history" IS 'Historique du bâtiment';
 
 
 
-COMMENT ON COLUMN "public"."batiments"."created_at" IS 'Date de création de l''info en BD';
+COMMENT ON COLUMN "public"."buildings"."project_id" IS 'Projet auquel appartient le bâtiment';
 
 
 
-COMMENT ON COLUMN "public"."batiments"."created_by" IS 'Utilisateur créateur';
+COMMENT ON COLUMN "public"."buildings"."created_at" IS 'Date de création de l''info en BD';
 
 
 
-COMMENT ON COLUMN "public"."batiments"."updated_by" IS 'Utilisateur modificateur';
+COMMENT ON COLUMN "public"."buildings"."created_by" IS 'Utilisateur créateur';
+
+
+
+COMMENT ON COLUMN "public"."buildings"."updated_by" IS 'Utilisateur modificateur';
 
 
 
@@ -319,12 +361,12 @@ CREATE TABLE IF NOT EXISTS "public"."doc_to_review" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "uploaded_by" "uuid" NOT NULL,
-    "doc_name" "text",
-    "doc_link" "text",
+    "doc_name" "text" NOT NULL,
+    "doc_link" "text" NOT NULL,
     "phase_name" "text",
     "project_id" "uuid" NOT NULL,
     "assigned_users" "text"[],
-    "review_state" "text" DEFAULT 'to_review'::"text",
+    "review_state" "text" DEFAULT 'to_review'::"text" NOT NULL,
     "read_only" boolean DEFAULT false,
     "is_external_upload" boolean DEFAULT false,
     "deadline" "date"
@@ -336,10 +378,10 @@ ALTER TABLE "public"."doc_to_review" OWNER TO "postgres";
 
 CREATE TABLE IF NOT EXISTS "public"."doc_to_review_state" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "doc_to_review_id" "uuid" DEFAULT "gen_random_uuid"(),
-    "user_id" "uuid" DEFAULT "gen_random_uuid"(),
-    "state" "text",
-    "updated_at" timestamp without time zone
+    "doc_to_review_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "user_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "state" "text" NOT NULL,
+    "updated_at" timestamp without time zone NOT NULL
 );
 
 
@@ -348,49 +390,13 @@ ALTER TABLE "public"."doc_to_review_state" OWNER TO "postgres";
 
 CREATE TABLE IF NOT EXISTS "public"."phases" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "nom" "text",
-    "ordre" real,
+    "name" "text",
+    "sort_order" real,
     "type" "text"
 );
 
 
 ALTER TABLE "public"."phases" OWNER TO "postgres";
-
-
-CREATE TABLE IF NOT EXISTS "public"."plans_batiment" (
-    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "batiment_id" "uuid",
-    "nom" "text",
-    "image_url" "text",
-    "created_by" "uuid",
-    "updated_by" "uuid",
-    "type" "text",
-    "ordre" bigint,
-    "image_plan_path" "text"
-);
-
-
-ALTER TABLE "public"."plans_batiment" OWNER TO "postgres";
-
-
-COMMENT ON TABLE "public"."plans_batiment" IS 'Plans des bâtiments';
-
-
-
-COMMENT ON COLUMN "public"."plans_batiment"."id" IS 'Identifiant unique du plan';
-
-
-
-COMMENT ON COLUMN "public"."plans_batiment"."batiment_id" IS 'Identifiant du bâtiment auquel le plan appartient';
-
-
-
-COMMENT ON COLUMN "public"."plans_batiment"."nom" IS 'Nom du plan';
-
-
-
-COMMENT ON COLUMN "public"."plans_batiment"."image_url" IS 'URL de l''image du plan';
-
 
 
 CREATE TABLE IF NOT EXISTS "public"."profiles" (
@@ -427,8 +433,8 @@ ALTER TABLE "public"."project_members" OWNER TO "postgres";
 CREATE TABLE IF NOT EXISTS "public"."project_phases" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "project_id" "uuid" NOT NULL,
-    "ordre" integer DEFAULT 0 NOT NULL,
-    "phase_id" "uuid" DEFAULT "gen_random_uuid"()
+    "sort_order" integer DEFAULT 0 NOT NULL,
+    "phase_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL
 );
 
 
@@ -437,11 +443,11 @@ ALTER TABLE "public"."project_phases" OWNER TO "postgres";
 
 CREATE TABLE IF NOT EXISTS "public"."projects" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "nom" "text" NOT NULL,
-    "adresse" "text",
-    "annee_construction" "text",
+    "name" "text" NOT NULL,
+    "address" "text",
+    "construction_year" "text",
     "description" "text",
-    "date_creation" timestamp with time zone DEFAULT "now"(),
+    "created_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
     "updated_by" "uuid",
     "active" boolean DEFAULT true NOT NULL,
@@ -462,15 +468,15 @@ COMMENT ON COLUMN "public"."projects"."id" IS 'Identifiant unique du projet';
 
 
 
-COMMENT ON COLUMN "public"."projects"."nom" IS 'Nom du projet';
+COMMENT ON COLUMN "public"."projects"."name" IS 'Nom du projet';
 
 
 
-COMMENT ON COLUMN "public"."projects"."adresse" IS 'Adresse du projet';
+COMMENT ON COLUMN "public"."projects"."address" IS 'Adresse du projet';
 
 
 
-COMMENT ON COLUMN "public"."projects"."annee_construction" IS 'Année de construction du projet';
+COMMENT ON COLUMN "public"."projects"."construction_year" IS 'Année de construction du projet';
 
 
 
@@ -478,11 +484,11 @@ COMMENT ON COLUMN "public"."projects"."description" IS 'Description du projet';
 
 
 
-COMMENT ON COLUMN "public"."projects"."date_creation" IS 'Date de création du projet';
+COMMENT ON COLUMN "public"."projects"."created_at" IS 'Date de création du projet';
 
 
 
-CREATE TABLE IF NOT EXISTS "public"."releve_field_config" (
+CREATE TABLE IF NOT EXISTS "public"."record_field_config" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "project_id" "uuid" NOT NULL,
     "key" "text" NOT NULL,
@@ -493,16 +499,16 @@ CREATE TABLE IF NOT EXISTS "public"."releve_field_config" (
     "sort_order" integer DEFAULT 0 NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
-    CONSTRAINT "releve_field_config_type_check" CHECK (("type" = ANY (ARRAY['text'::"text", 'number'::"text", 'boolean'::"text", 'select'::"text", 'date'::"text"])))
+    CONSTRAINT "record_field_config_type_check" CHECK (("type" = ANY (ARRAY['text'::"text", 'number'::"text", 'boolean'::"text", 'select'::"text", 'date'::"text"])))
 );
 
 
-ALTER TABLE "public"."releve_field_config" OWNER TO "postgres";
+ALTER TABLE "public"."record_field_config" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."sites" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "nom" "text" NOT NULL,
+    "name" "text" NOT NULL,
     "project_id" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
@@ -521,7 +527,7 @@ COMMENT ON COLUMN "public"."sites"."id" IS 'Identifiant du site';
 
 
 
-COMMENT ON COLUMN "public"."sites"."nom" IS 'Nom du site';
+COMMENT ON COLUMN "public"."sites"."name" IS 'Nom du site';
 
 
 
@@ -529,25 +535,25 @@ COMMENT ON COLUMN "public"."sites"."project_id" IS 'Identifiant du projet ratach
 
 
 
-CREATE TABLE IF NOT EXISTS "public"."v2_commentaires" (
+CREATE TABLE IF NOT EXISTS "public"."v2_comments" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "releve_id" "uuid" NOT NULL,
-    "texte" "text" NOT NULL,
-    "auteur_id" "uuid",
+    "record_id" "uuid" NOT NULL,
+    "text" "text" NOT NULL,
+    "author_id" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"()
 );
 
 
-ALTER TABLE "public"."v2_commentaires" OWNER TO "postgres";
+ALTER TABLE "public"."v2_comments" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."v2_photos" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "releve_id" "uuid" NOT NULL,
+    "record_id" "uuid" NOT NULL,
     "url" "text" NOT NULL,
-    "legende" "text",
-    "created_by" "uuid",
+    "caption" "text",
+    "created_by" "uuid" NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"()
 );
 
@@ -558,65 +564,62 @@ ALTER TABLE "public"."v2_photos" OWNER TO "postgres";
 CREATE TABLE IF NOT EXISTS "public"."v2_project_themes" (
     "project_id" "uuid" NOT NULL,
     "theme_id" "uuid" NOT NULL,
-    "cible" "text" NOT NULL,
-    CONSTRAINT "check_cible_values" CHECK (("cible" = ANY (ARRAY['site'::"text", 'batiment'::"text", 'document'::"text"])))
+    "target" "text" NOT NULL
 );
 
 
 ALTER TABLE "public"."v2_project_themes" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."v2_releves" (
+CREATE TABLE IF NOT EXISTS "public"."v2_record_users" (
+    "record_id" "uuid" NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"()
+);
+
+
+ALTER TABLE "public"."v2_record_users" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."v2_records" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "cible_type" "text" NOT NULL,
+    "target_type" "text" NOT NULL,
     "project_id" "uuid",
     "site_id" "uuid",
-    "batiment_id" "uuid",
+    "building_id" "uuid",
     "plan_id" "uuid",
-    "auteur_id" "uuid",
+    "author_id" "uuid",
     "pos_x" double precision,
     "pos_y" double precision,
-    "impact" integer,
-    "description" "text",
-    "theme_name" "text",
+    "impact" integer NOT NULL,
+    "description" "text" NOT NULL,
+    "theme_name" "text" NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "document_id" "uuid",
     "metadata" "jsonb" DEFAULT '{}'::"jsonb",
     "phase_name" "text" DEFAULT ''::"text",
-    "details" "jsonb" DEFAULT '{}'::"jsonb",
-    CONSTRAINT "v2_releves_cible_type_check" CHECK (("cible_type" = ANY (ARRAY['site'::"text", 'batiment'::"text", 'document'::"text"])))
+    "details" "jsonb" DEFAULT '{}'::"jsonb"
 );
 
 
-ALTER TABLE "public"."v2_releves" OWNER TO "postgres";
+ALTER TABLE "public"."v2_records" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."v2_themes" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "nom" "text" NOT NULL,
-    "applicable_a" "text" NOT NULL,
-    "project_id" "uuid",
-    CONSTRAINT "v2_themes_applicable_a_check" CHECK (("applicable_a" = ANY (ARRAY['site'::"text", 'batiment'::"text", 'document'::"text"])))
+    "name" "text" NOT NULL,
+    "applicable_to" "text" NOT NULL,
+    "project_id" "uuid"
 );
 
 
 ALTER TABLE "public"."v2_themes" OWNER TO "postgres";
 
 
-CREATE TABLE IF NOT EXISTS "public"."v2_utilisateurs_releves" (
-    "releve_id" "uuid" NOT NULL,
-    "user_id" "uuid" NOT NULL,
-    "created_at" timestamp with time zone DEFAULT "now"()
-);
-
-
-ALTER TABLE "public"."v2_utilisateurs_releves" OWNER TO "postgres";
-
-
 CREATE TABLE IF NOT EXISTS "public"."zones_plan" (
-    "type" "text" DEFAULT 'poly'::"text",
-    "titre" "text" NOT NULL,
+    "type" "text" DEFAULT 'poly'::"text" NOT NULL,
+    "title" "text" NOT NULL,
     "points" "jsonb" NOT NULL,
     "plan_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
@@ -632,8 +635,18 @@ COMMENT ON TABLE "public"."zones_plan" IS 'Liste des zones des plans';
 
 
 
-ALTER TABLE ONLY "public"."batiments"
-    ADD CONSTRAINT "batiments_pkey" PRIMARY KEY ("id");
+ALTER TABLE ONLY "public"."building_plans"
+    ADD CONSTRAINT "building_plans_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."buildings"
+    ADD CONSTRAINT "buildings_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "public"."v2_project_themes"
+    ADD CONSTRAINT "check_target_values" CHECK (("target" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text"]))) NOT VALID;
 
 
 
@@ -649,11 +662,6 @@ ALTER TABLE ONLY "public"."doc_to_review_state"
 
 ALTER TABLE ONLY "public"."phases"
     ADD CONSTRAINT "phases_pkey" PRIMARY KEY ("id");
-
-
-
-ALTER TABLE ONLY "public"."plans_batiment"
-    ADD CONSTRAINT "plans_batiment_pkey" PRIMARY KEY ("id");
 
 
 
@@ -673,7 +681,7 @@ ALTER TABLE ONLY "public"."project_phases"
 
 
 ALTER TABLE ONLY "public"."project_phases"
-    ADD CONSTRAINT "project_phases_project_id_ordre_key" UNIQUE ("project_id", "ordre");
+    ADD CONSTRAINT "project_phases_project_id_sort_order_key" UNIQUE ("project_id", "sort_order");
 
 
 
@@ -682,13 +690,13 @@ ALTER TABLE ONLY "public"."projects"
 
 
 
-ALTER TABLE ONLY "public"."releve_field_config"
-    ADD CONSTRAINT "releve_field_config_pkey" PRIMARY KEY ("id");
+ALTER TABLE ONLY "public"."record_field_config"
+    ADD CONSTRAINT "record_field_config_pkey" PRIMARY KEY ("id");
 
 
 
-ALTER TABLE ONLY "public"."releve_field_config"
-    ADD CONSTRAINT "releve_field_config_project_id_key_key" UNIQUE ("project_id", "key");
+ALTER TABLE ONLY "public"."record_field_config"
+    ADD CONSTRAINT "record_field_config_project_id_key_key" UNIQUE ("project_id", "key");
 
 
 
@@ -707,8 +715,8 @@ ALTER TABLE ONLY "public"."project_members"
 
 
 
-ALTER TABLE ONLY "public"."v2_commentaires"
-    ADD CONSTRAINT "v2_commentaires_pkey" PRIMARY KEY ("id");
+ALTER TABLE ONLY "public"."v2_comments"
+    ADD CONSTRAINT "v2_comments_pkey" PRIMARY KEY ("id");
 
 
 
@@ -718,12 +726,27 @@ ALTER TABLE ONLY "public"."v2_photos"
 
 
 ALTER TABLE ONLY "public"."v2_project_themes"
-    ADD CONSTRAINT "v2_project_themes_pkey" PRIMARY KEY ("project_id", "theme_id", "cible");
+    ADD CONSTRAINT "v2_project_themes_pkey" PRIMARY KEY ("project_id", "theme_id", "target");
 
 
 
-ALTER TABLE ONLY "public"."v2_releves"
-    ADD CONSTRAINT "v2_releves_pkey" PRIMARY KEY ("id");
+ALTER TABLE ONLY "public"."v2_record_users"
+    ADD CONSTRAINT "v2_record_users_pkey" PRIMARY KEY ("record_id", "user_id");
+
+
+
+ALTER TABLE ONLY "public"."v2_records"
+    ADD CONSTRAINT "v2_records_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "public"."v2_records"
+    ADD CONSTRAINT "v2_records_target_type_check" CHECK (("target_type" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text"]))) NOT VALID;
+
+
+
+ALTER TABLE "public"."v2_themes"
+    ADD CONSTRAINT "v2_themes_applicable_to_check" CHECK (("applicable_to" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text"]))) NOT VALID;
 
 
 
@@ -732,17 +755,12 @@ ALTER TABLE ONLY "public"."v2_themes"
 
 
 
-ALTER TABLE ONLY "public"."v2_utilisateurs_releves"
-    ADD CONSTRAINT "v2_utilisateurs_releves_pkey" PRIMARY KEY ("releve_id", "user_id");
-
-
-
 ALTER TABLE ONLY "public"."zones_plan"
     ADD CONSTRAINT "zones_plan_pkey" PRIMARY KEY ("id");
 
 
 
-CREATE INDEX "idx_phases_project" ON "public"."project_phases" USING "btree" ("project_id", "ordre");
+CREATE INDEX "idx_phases_project" ON "public"."project_phases" USING "btree" ("project_id", "sort_order");
 
 
 
@@ -758,7 +776,7 @@ CREATE INDEX "project_phases_project_id_idx" ON "public"."project_phases" USING 
 
 
 
-CREATE INDEX "v2_releves_projet_id_idx" ON "public"."v2_releves" USING "btree" ("project_id");
+CREATE INDEX "v2_releves_projet_id_idx" ON "public"."v2_records" USING "btree" ("project_id");
 
 
 
@@ -766,11 +784,11 @@ CREATE OR REPLACE TRIGGER "on_project_created" AFTER INSERT ON "public"."project
 
 
 
-CREATE OR REPLACE TRIGGER "set_created_by_batiments" BEFORE INSERT ON "public"."batiments" FOR EACH ROW EXECUTE FUNCTION "public"."set_created_by"();
+CREATE OR REPLACE TRIGGER "set_created_by_building_plans" BEFORE INSERT ON "public"."building_plans" FOR EACH ROW EXECUTE FUNCTION "public"."set_created_by"();
 
 
 
-CREATE OR REPLACE TRIGGER "set_created_by_plans_batiment" BEFORE INSERT ON "public"."plans_batiment" FOR EACH ROW EXECUTE FUNCTION "public"."set_created_by"();
+CREATE OR REPLACE TRIGGER "set_created_by_buildings" BEFORE INSERT ON "public"."buildings" FOR EACH ROW EXECUTE FUNCTION "public"."set_created_by"();
 
 
 
@@ -782,11 +800,15 @@ CREATE OR REPLACE TRIGGER "set_created_by_sites" BEFORE INSERT ON "public"."site
 
 
 
-CREATE OR REPLACE TRIGGER "set_updated_by_batiments" BEFORE UPDATE ON "public"."batiments" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_by"();
+CREATE OR REPLACE TRIGGER "set_created_by_v2_photos" BEFORE INSERT ON "public"."v2_photos" FOR EACH ROW EXECUTE FUNCTION "public"."set_created_by"();
 
 
 
-CREATE OR REPLACE TRIGGER "set_updated_by_plans_batiment" BEFORE UPDATE ON "public"."plans_batiment" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_by"();
+CREATE OR REPLACE TRIGGER "set_updated_by_building_plans" BEFORE UPDATE ON "public"."building_plans" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_by"();
+
+
+
+CREATE OR REPLACE TRIGGER "set_updated_by_buildings" BEFORE UPDATE ON "public"."buildings" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_by"();
 
 
 
@@ -798,13 +820,18 @@ CREATE OR REPLACE TRIGGER "set_updated_by_sites" BEFORE UPDATE ON "public"."site
 
 
 
-ALTER TABLE ONLY "public"."batiments"
-    ADD CONSTRAINT "batiments_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."building_plans"
+    ADD CONSTRAINT "building_plans_building_id_fkey" FOREIGN KEY ("building_id") REFERENCES "public"."buildings"("id") ON DELETE CASCADE;
 
 
 
-ALTER TABLE ONLY "public"."batiments"
-    ADD CONSTRAINT "batiments_site_id_fkey" FOREIGN KEY ("site_id") REFERENCES "public"."sites"("id") ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."buildings"
+    ADD CONSTRAINT "buildings_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."buildings"
+    ADD CONSTRAINT "buildings_site_id_fkey" FOREIGN KEY ("site_id") REFERENCES "public"."sites"("id") ON DELETE CASCADE;
 
 
 
@@ -825,11 +852,6 @@ ALTER TABLE ONLY "public"."doc_to_review_state"
 
 ALTER TABLE ONLY "public"."doc_to_review"
     ADD CONSTRAINT "doc_to_review_uploaded_by_fkey" FOREIGN KEY ("uploaded_by") REFERENCES "auth"."users"("id") ON UPDATE CASCADE ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."plans_batiment"
-    ADD CONSTRAINT "plans_batiment_batiment_id_fkey" FOREIGN KEY ("batiment_id") REFERENCES "public"."batiments"("id") ON DELETE CASCADE;
 
 
 
@@ -863,8 +885,8 @@ ALTER TABLE ONLY "public"."projects"
 
 
 
-ALTER TABLE ONLY "public"."releve_field_config"
-    ADD CONSTRAINT "releve_field_config_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."record_field_config"
+    ADD CONSTRAINT "record_field_config_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
 
 
 
@@ -873,13 +895,13 @@ ALTER TABLE ONLY "public"."sites"
 
 
 
-ALTER TABLE ONLY "public"."v2_commentaires"
-    ADD CONSTRAINT "v2_commentaires_auteur_id_fkey" FOREIGN KEY ("auteur_id") REFERENCES "auth"."users"("id");
+ALTER TABLE ONLY "public"."v2_comments"
+    ADD CONSTRAINT "v2_comments_author_id_fkey" FOREIGN KEY ("author_id") REFERENCES "auth"."users"("id");
 
 
 
-ALTER TABLE ONLY "public"."v2_commentaires"
-    ADD CONSTRAINT "v2_commentaires_releve_id_fkey" FOREIGN KEY ("releve_id") REFERENCES "public"."v2_releves"("id") ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."v2_comments"
+    ADD CONSTRAINT "v2_comments_record_id_fkey" FOREIGN KEY ("record_id") REFERENCES "public"."v2_records"("id") ON DELETE CASCADE;
 
 
 
@@ -889,7 +911,7 @@ ALTER TABLE ONLY "public"."v2_photos"
 
 
 ALTER TABLE ONLY "public"."v2_photos"
-    ADD CONSTRAINT "v2_photos_releve_id_fkey" FOREIGN KEY ("releve_id") REFERENCES "public"."v2_releves"("id") ON DELETE CASCADE;
+    ADD CONSTRAINT "v2_photos_record_id_fkey" FOREIGN KEY ("record_id") REFERENCES "public"."v2_records"("id") ON DELETE CASCADE;
 
 
 
@@ -903,48 +925,48 @@ ALTER TABLE ONLY "public"."v2_project_themes"
 
 
 
-ALTER TABLE ONLY "public"."v2_releves"
-    ADD CONSTRAINT "v2_releves_auteur_id_fkey" FOREIGN KEY ("auteur_id") REFERENCES "auth"."users"("id");
+ALTER TABLE ONLY "public"."v2_record_users"
+    ADD CONSTRAINT "v2_record_users_record_id_fkey" FOREIGN KEY ("record_id") REFERENCES "public"."v2_records"("id") ON DELETE CASCADE;
 
 
 
-ALTER TABLE ONLY "public"."v2_releves"
-    ADD CONSTRAINT "v2_releves_batiment_id_fkey" FOREIGN KEY ("batiment_id") REFERENCES "public"."batiments"("id") ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."v2_record_users"
+    ADD CONSTRAINT "v2_record_users_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
 
 
-ALTER TABLE ONLY "public"."v2_releves"
-    ADD CONSTRAINT "v2_releves_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."doc_to_review"("id") ON UPDATE CASCADE ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."v2_records"
+    ADD CONSTRAINT "v2_records_author_id_fkey" FOREIGN KEY ("author_id") REFERENCES "auth"."users"("id");
 
 
 
-ALTER TABLE ONLY "public"."v2_releves"
-    ADD CONSTRAINT "v2_releves_plan_id_fkey" FOREIGN KEY ("plan_id") REFERENCES "public"."plans_batiment"("id") ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."v2_records"
+    ADD CONSTRAINT "v2_records_building_id_fkey" FOREIGN KEY ("building_id") REFERENCES "public"."buildings"("id") ON DELETE CASCADE;
 
 
 
-ALTER TABLE ONLY "public"."v2_releves"
-    ADD CONSTRAINT "v2_releves_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."v2_records"
+    ADD CONSTRAINT "v2_records_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."doc_to_review"("id") ON UPDATE CASCADE ON DELETE CASCADE;
 
 
 
-ALTER TABLE ONLY "public"."v2_releves"
-    ADD CONSTRAINT "v2_releves_site_id_fkey" FOREIGN KEY ("site_id") REFERENCES "public"."sites"("id") ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."v2_records"
+    ADD CONSTRAINT "v2_records_plan_id_fkey" FOREIGN KEY ("plan_id") REFERENCES "public"."building_plans"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."v2_records"
+    ADD CONSTRAINT "v2_records_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."v2_records"
+    ADD CONSTRAINT "v2_records_site_id_fkey" FOREIGN KEY ("site_id") REFERENCES "public"."sites"("id") ON DELETE CASCADE;
 
 
 
 ALTER TABLE ONLY "public"."v2_themes"
     ADD CONSTRAINT "v2_themes_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."v2_utilisateurs_releves"
-    ADD CONSTRAINT "v2_utilisateurs_releves_releve_id_fkey" FOREIGN KEY ("releve_id") REFERENCES "public"."v2_releves"("id") ON DELETE CASCADE;
-
-
-
-ALTER TABLE ONLY "public"."v2_utilisateurs_releves"
-    ADD CONSTRAINT "v2_utilisateurs_releves_utilisateur_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
 
 
 
@@ -954,7 +976,7 @@ ALTER TABLE ONLY "public"."zones_plan"
 
 
 ALTER TABLE ONLY "public"."zones_plan"
-    ADD CONSTRAINT "zones_plans_plan_id_fkey" FOREIGN KEY ("plan_id") REFERENCES "public"."plans_batiment"("id") ON UPDATE CASCADE ON DELETE CASCADE;
+    ADD CONSTRAINT "zones_plans_plan_id_fkey" FOREIGN KEY ("plan_id") REFERENCES "public"."building_plans"("id") ON UPDATE CASCADE ON DELETE CASCADE;
 
 
 
@@ -978,15 +1000,15 @@ CREATE POLICY "Enable delete access for all users" ON "public"."v2_photos" FOR D
 
 
 
-CREATE POLICY "Enable delete access for all users" ON "public"."v2_utilisateurs_releves" FOR DELETE TO "authenticated" USING (true);
+CREATE POLICY "Enable delete access for all users" ON "public"."v2_record_users" FOR DELETE TO "authenticated" USING (true);
 
 
 
-CREATE POLICY "Enable delete for users based on user_id" ON "public"."v2_commentaires" FOR DELETE USING ((( SELECT "auth"."uid"() AS "uid") = "auteur_id"));
+CREATE POLICY "Enable delete for users based on user_id" ON "public"."v2_comments" FOR DELETE USING ((( SELECT "auth"."uid"() AS "uid") = "author_id"));
 
 
 
-CREATE POLICY "Enable delete for users based on user_id" ON "public"."v2_releves" FOR DELETE TO "authenticated" USING ((( SELECT "auth"."uid"() AS "uid") = "auteur_id"));
+CREATE POLICY "Enable delete for users based on user_id" ON "public"."v2_records" FOR DELETE TO "authenticated" USING ((( SELECT "auth"."uid"() AS "uid") = "author_id"));
 
 
 
@@ -1002,15 +1024,15 @@ CREATE POLICY "Enable insert access for all users" ON "public"."doc_to_review_st
 
 
 
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."batiments" FOR INSERT TO "authenticated" WITH CHECK (true);
+CREATE POLICY "Enable insert for authenticated users only" ON "public"."building_plans" FOR INSERT TO "authenticated" WITH CHECK (true);
+
+
+
+CREATE POLICY "Enable insert for authenticated users only" ON "public"."buildings" FOR INSERT TO "authenticated" WITH CHECK (true);
 
 
 
 CREATE POLICY "Enable insert for authenticated users only" ON "public"."doc_to_review" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."plans_batiment" FOR INSERT TO "authenticated" WITH CHECK (true);
 
 
 
@@ -1022,7 +1044,7 @@ CREATE POLICY "Enable insert for authenticated users only" ON "public"."project_
 
 
 
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_commentaires" FOR INSERT TO "authenticated" WITH CHECK (true);
+CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_comments" FOR INSERT TO "authenticated" WITH CHECK (true);
 
 
 
@@ -1034,7 +1056,11 @@ CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_proje
 
 
 
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_releves" FOR INSERT TO "authenticated" WITH CHECK (true);
+CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_record_users" FOR INSERT TO "authenticated" WITH CHECK (true);
+
+
+
+CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_records" FOR INSERT TO "authenticated" WITH CHECK (true);
 
 
 
@@ -1042,15 +1068,15 @@ CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_theme
 
 
 
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_utilisateurs_releves" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
 CREATE POLICY "Enable insert for authenticated users only" ON "public"."zones_plan" FOR INSERT TO "authenticated" WITH CHECK (true);
 
 
 
-CREATE POLICY "Enable read access for all users" ON "public"."batiments" FOR SELECT TO "authenticated" USING (true);
+CREATE POLICY "Enable read access for all users" ON "public"."building_plans" FOR SELECT TO "authenticated" USING (true);
+
+
+
+CREATE POLICY "Enable read access for all users" ON "public"."buildings" FOR SELECT TO "authenticated" USING (true);
 
 
 
@@ -1062,10 +1088,6 @@ CREATE POLICY "Enable read access for all users" ON "public"."phases" FOR SELECT
 
 
 
-CREATE POLICY "Enable read access for all users" ON "public"."plans_batiment" FOR SELECT TO "authenticated" USING (true);
-
-
-
 CREATE POLICY "Enable read access for all users" ON "public"."project_phases" FOR SELECT TO "authenticated" USING (true);
 
 
@@ -1074,7 +1096,7 @@ CREATE POLICY "Enable read access for all users" ON "public"."sites" FOR SELECT 
 
 
 
-CREATE POLICY "Enable read access for all users" ON "public"."v2_commentaires" FOR SELECT TO "authenticated" USING (true);
+CREATE POLICY "Enable read access for all users" ON "public"."v2_comments" FOR SELECT TO "authenticated" USING (true);
 
 
 
@@ -1086,15 +1108,15 @@ CREATE POLICY "Enable read access for all users" ON "public"."v2_project_themes"
 
 
 
-CREATE POLICY "Enable read access for all users" ON "public"."v2_releves" FOR SELECT TO "authenticated" USING (true);
+CREATE POLICY "Enable read access for all users" ON "public"."v2_record_users" FOR SELECT TO "authenticated" USING (true);
+
+
+
+CREATE POLICY "Enable read access for all users" ON "public"."v2_records" FOR SELECT TO "authenticated" USING (true);
 
 
 
 CREATE POLICY "Enable read access for all users" ON "public"."v2_themes" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable read access for all users" ON "public"."v2_utilisateurs_releves" FOR SELECT TO "authenticated" USING (true);
 
 
 
@@ -1122,11 +1144,11 @@ CREATE POLICY "Enable update access for all users" ON "public"."v2_project_theme
 
 
 
-CREATE POLICY "Enable update access for all users" ON "public"."v2_releves" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
+CREATE POLICY "Enable update access for all users" ON "public"."v2_record_users" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
 
 
 
-CREATE POLICY "Enable update access for all users" ON "public"."v2_utilisateurs_releves" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
+CREATE POLICY "Enable update access for all users" ON "public"."v2_records" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
 
 
 
@@ -1134,7 +1156,7 @@ CREATE POLICY "Enable update for authenticated users only" ON "public"."project_
 
 
 
-CREATE POLICY "Enable update for authenticated users only" ON "public"."v2_commentaires" FOR UPDATE TO "authenticated" USING (true) WITH CHECK ((( SELECT "auth"."uid"() AS "uid") = "auteur_id"));
+CREATE POLICY "Enable update for authenticated users only" ON "public"."v2_comments" FOR UPDATE TO "authenticated" USING (true) WITH CHECK ((( SELECT "auth"."uid"() AS "uid") = "author_id"));
 
 
 
@@ -1146,11 +1168,11 @@ CREATE POLICY "Enable update for users based on user_id" ON "public"."zones_plan
 
 
 
-CREATE POLICY "Field config - Read by project members or kutx_super_admin" ON "public"."releve_field_config" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("releve_field_config"."project_id") AS "get_my_project_role") IS NOT NULL)));
+CREATE POLICY "Field config - Read by project members or kutx_super_admin" ON "public"."record_field_config" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("record_field_config"."project_id") AS "get_my_project_role") IS NOT NULL)));
 
 
 
-CREATE POLICY "Field config - Write by project_admin or kutx_super_admin" ON "public"."releve_field_config" TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("releve_field_config"."project_id") AS "get_my_project_role") = 'project_admin'::"text"))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("releve_field_config"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+CREATE POLICY "Field config - Write by project_admin or kutx_super_admin" ON "public"."record_field_config" TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("record_field_config"."project_id") AS "get_my_project_role") = 'project_admin'::"text"))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("record_field_config"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
 
 
 
@@ -1178,11 +1200,11 @@ CREATE POLICY "Projects - Update/Delete by project_admin or kutx_super_admin" ON
 
 
 
-CREATE POLICY "Users can delete batiments" ON "public"."batiments" FOR DELETE TO "authenticated" USING (("created_by" = "auth"."uid"()));
+CREATE POLICY "Users can delete buildings" ON "public"."buildings" FOR DELETE TO "authenticated" USING (("created_by" = "auth"."uid"()));
 
 
 
-CREATE POLICY "Users can delete plans" ON "public"."plans_batiment" FOR DELETE TO "authenticated" USING (("created_by" = "auth"."uid"()));
+CREATE POLICY "Users can delete plans" ON "public"."building_plans" FOR DELETE TO "authenticated" USING (("created_by" = "auth"."uid"()));
 
 
 
@@ -1194,11 +1216,11 @@ CREATE POLICY "Users can insert sites" ON "public"."sites" FOR INSERT TO "authen
 
 
 
-CREATE POLICY "Users can update batiments" ON "public"."batiments" FOR UPDATE TO "authenticated" USING (("created_by" = "auth"."uid"()));
+CREATE POLICY "Users can update buildings" ON "public"."buildings" FOR UPDATE TO "authenticated" USING (("created_by" = "auth"."uid"()));
 
 
 
-CREATE POLICY "Users can update plans" ON "public"."plans_batiment" FOR UPDATE TO "authenticated" USING (("created_by" = "auth"."uid"()));
+CREATE POLICY "Users can update plans" ON "public"."building_plans" FOR UPDATE TO "authenticated" USING (("created_by" = "auth"."uid"()));
 
 
 
@@ -1222,7 +1244,10 @@ CREATE POLICY "Voir les collaborateurs de mes projets" ON "public"."profiles" FO
 
 
 
-ALTER TABLE "public"."batiments" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."building_plans" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."buildings" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."doc_to_review" ENABLE ROW LEVEL SECURITY;
@@ -1242,9 +1267,6 @@ CREATE POLICY "eneable delete" ON "public"."project_members" FOR DELETE TO "auth
 ALTER TABLE "public"."phases" ENABLE ROW LEVEL SECURITY;
 
 
-ALTER TABLE "public"."plans_batiment" ENABLE ROW LEVEL SECURITY;
-
-
 ALTER TABLE "public"."profiles" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1261,13 +1283,13 @@ CREATE POLICY "read" ON "public"."doc_to_review_state" FOR SELECT TO "authentica
 
 
 
-ALTER TABLE "public"."releve_field_config" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."record_field_config" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."sites" ENABLE ROW LEVEL SECURITY;
 
 
-ALTER TABLE "public"."v2_commentaires" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."v2_comments" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."v2_photos" ENABLE ROW LEVEL SECURITY;
@@ -1276,13 +1298,13 @@ ALTER TABLE "public"."v2_photos" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."v2_project_themes" ENABLE ROW LEVEL SECURITY;
 
 
-ALTER TABLE "public"."v2_releves" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."v2_record_users" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."v2_records" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."v2_themes" ENABLE ROW LEVEL SECURITY;
-
-
-ALTER TABLE "public"."v2_utilisateurs_releves" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."zones_plan" ENABLE ROW LEVEL SECURITY;
@@ -1531,6 +1553,41 @@ GRANT ALL ON FUNCTION "public"."is_email_taken"("p_email" "text") TO "service_ro
 
 
 
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect_all"() TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect_all"() TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect_all"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect_all"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."postgres_fdw_get_connections"(OUT "server_name" "text", OUT "valid" boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_get_connections"(OUT "server_name" "text", OUT "valid" boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_get_connections"(OUT "server_name" "text", OUT "valid" boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_get_connections"(OUT "server_name" "text", OUT "valid" boolean) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."postgres_fdw_handler"() TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_handler"() TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_handler"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_handler"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."postgres_fdw_validator"("text"[], "oid") TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_validator"("text"[], "oid") TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_validator"("text"[], "oid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_validator"("text"[], "oid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "anon";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "service_role";
@@ -1570,9 +1627,18 @@ GRANT ALL ON FUNCTION "public"."set_updated_by"() TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."batiments" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."batiments" TO "authenticated";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."batiments" TO "service_role";
+
+
+
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."building_plans" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."building_plans" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."building_plans" TO "service_role";
+
+
+
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."buildings" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."buildings" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."buildings" TO "service_role";
 
 
 
@@ -1591,12 +1657,6 @@ GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public".
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."phases" TO "anon";
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."phases" TO "authenticated";
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."phases" TO "service_role";
-
-
-
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."plans_batiment" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."plans_batiment" TO "authenticated";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."plans_batiment" TO "service_role";
 
 
 
@@ -1624,8 +1684,8 @@ GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public".
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."releve_field_config" TO "authenticated";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."releve_field_config" TO "service_role";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."record_field_config" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."record_field_config" TO "service_role";
 
 
 
@@ -1635,9 +1695,9 @@ GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public".
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_commentaires" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_commentaires" TO "authenticated";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_commentaires" TO "service_role";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_comments" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_comments" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_comments" TO "service_role";
 
 
 
@@ -1653,21 +1713,21 @@ GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public".
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_releves" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_releves" TO "authenticated";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_releves" TO "service_role";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_record_users" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_record_users" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_record_users" TO "service_role";
+
+
+
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_records" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_records" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_records" TO "service_role";
 
 
 
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_themes" TO "anon";
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_themes" TO "authenticated";
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_themes" TO "service_role";
-
-
-
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_utilisateurs_releves" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_utilisateurs_releves" TO "authenticated";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_utilisateurs_releves" TO "service_role";
 
 
 
