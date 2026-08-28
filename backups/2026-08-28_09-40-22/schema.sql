@@ -58,6 +58,13 @@ CREATE EXTENSION IF NOT EXISTS "pgjwt" WITH SCHEMA "extensions";
 
 
 
+CREATE EXTENSION IF NOT EXISTS "postgres_fdw" WITH SCHEMA "public";
+
+
+
+
+
+
 CREATE EXTENSION IF NOT EXISTS "supabase_vault" WITH SCHEMA "vault";
 
 
@@ -354,12 +361,12 @@ CREATE TABLE IF NOT EXISTS "public"."doc_to_review" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "uploaded_by" "uuid" NOT NULL,
-    "doc_name" "text",
-    "doc_link" "text",
+    "doc_name" "text" NOT NULL,
+    "doc_link" "text" NOT NULL,
     "phase_name" "text",
     "project_id" "uuid" NOT NULL,
     "assigned_users" "text"[],
-    "review_state" "text" DEFAULT 'to_review'::"text",
+    "review_state" "text" DEFAULT 'to_review'::"text" NOT NULL,
     "read_only" boolean DEFAULT false,
     "is_external_upload" boolean DEFAULT false,
     "deadline" "date"
@@ -371,10 +378,10 @@ ALTER TABLE "public"."doc_to_review" OWNER TO "postgres";
 
 CREATE TABLE IF NOT EXISTS "public"."doc_to_review_state" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "doc_to_review_id" "uuid" DEFAULT "gen_random_uuid"(),
-    "user_id" "uuid" DEFAULT "gen_random_uuid"(),
-    "state" "text",
-    "updated_at" timestamp without time zone
+    "doc_to_review_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "user_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "state" "text" NOT NULL,
+    "updated_at" timestamp without time zone NOT NULL
 );
 
 
@@ -427,7 +434,7 @@ CREATE TABLE IF NOT EXISTS "public"."project_phases" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "project_id" "uuid" NOT NULL,
     "sort_order" integer DEFAULT 0 NOT NULL,
-    "phase_id" "uuid" DEFAULT "gen_random_uuid"()
+    "phase_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL
 );
 
 
@@ -557,8 +564,7 @@ ALTER TABLE "public"."v2_photos" OWNER TO "postgres";
 CREATE TABLE IF NOT EXISTS "public"."v2_project_themes" (
     "project_id" "uuid" NOT NULL,
     "theme_id" "uuid" NOT NULL,
-    "target" "text" NOT NULL,
-    CONSTRAINT "check_target_values" CHECK (("target" = ANY (ARRAY['site'::"text", 'batiment'::"text", 'document'::"text"])))
+    "target" "text" NOT NULL
 );
 
 
@@ -585,16 +591,15 @@ CREATE TABLE IF NOT EXISTS "public"."v2_records" (
     "author_id" "uuid",
     "pos_x" double precision,
     "pos_y" double precision,
-    "impact" integer,
-    "description" "text",
-    "theme_name" "text",
+    "impact" integer NOT NULL,
+    "description" "text" NOT NULL,
+    "theme_name" "text" NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "document_id" "uuid",
     "metadata" "jsonb" DEFAULT '{}'::"jsonb",
     "phase_name" "text" DEFAULT ''::"text",
-    "details" "jsonb" DEFAULT '{}'::"jsonb",
-    CONSTRAINT "v2_records_target_type_check" CHECK (("target_type" = ANY (ARRAY['site'::"text", 'batiment'::"text", 'document'::"text"])))
+    "details" "jsonb" DEFAULT '{}'::"jsonb"
 );
 
 
@@ -605,8 +610,7 @@ CREATE TABLE IF NOT EXISTS "public"."v2_themes" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "name" "text" NOT NULL,
     "applicable_to" "text" NOT NULL,
-    "project_id" "uuid",
-    CONSTRAINT "v2_themes_applicable_to_check" CHECK (("applicable_to" = ANY (ARRAY['site'::"text", 'batiment'::"text", 'document'::"text"])))
+    "project_id" "uuid"
 );
 
 
@@ -614,7 +618,7 @@ ALTER TABLE "public"."v2_themes" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."zones_plan" (
-    "type" "text" DEFAULT 'poly'::"text",
+    "type" "text" DEFAULT 'poly'::"text" NOT NULL,
     "title" "text" NOT NULL,
     "points" "jsonb" NOT NULL,
     "plan_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
@@ -638,6 +642,11 @@ ALTER TABLE ONLY "public"."building_plans"
 
 ALTER TABLE ONLY "public"."buildings"
     ADD CONSTRAINT "buildings_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE "public"."v2_project_themes"
+    ADD CONSTRAINT "check_target_values" CHECK (("target" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text"]))) NOT VALID;
 
 
 
@@ -731,6 +740,16 @@ ALTER TABLE ONLY "public"."v2_records"
 
 
 
+ALTER TABLE "public"."v2_records"
+    ADD CONSTRAINT "v2_records_target_type_check" CHECK (("target_type" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text"]))) NOT VALID;
+
+
+
+ALTER TABLE "public"."v2_themes"
+    ADD CONSTRAINT "v2_themes_applicable_to_check" CHECK (("applicable_to" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text"]))) NOT VALID;
+
+
+
 ALTER TABLE ONLY "public"."v2_themes"
     ADD CONSTRAINT "v2_themes_pkey" PRIMARY KEY ("id");
 
@@ -778,6 +797,10 @@ CREATE OR REPLACE TRIGGER "set_created_by_projects" BEFORE INSERT ON "public"."p
 
 
 CREATE OR REPLACE TRIGGER "set_created_by_sites" BEFORE INSERT ON "public"."sites" FOR EACH ROW EXECUTE FUNCTION "public"."set_created_by"();
+
+
+
+CREATE OR REPLACE TRIGGER "set_created_by_v2_photos" BEFORE INSERT ON "public"."v2_photos" FOR EACH ROW EXECUTE FUNCTION "public"."set_created_by"();
 
 
 
@@ -1530,6 +1553,41 @@ GRANT ALL ON FUNCTION "public"."is_email_taken"("p_email" "text") TO "service_ro
 
 
 
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect_all"() TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect_all"() TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect_all"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect_all"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."postgres_fdw_get_connections"(OUT "server_name" "text", OUT "valid" boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_get_connections"(OUT "server_name" "text", OUT "valid" boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_get_connections"(OUT "server_name" "text", OUT "valid" boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_get_connections"(OUT "server_name" "text", OUT "valid" boolean) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."postgres_fdw_handler"() TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_handler"() TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_handler"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_handler"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."postgres_fdw_validator"("text"[], "oid") TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_validator"("text"[], "oid") TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_validator"("text"[], "oid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_validator"("text"[], "oid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "anon";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "service_role";
@@ -1545,6 +1603,9 @@ GRANT ALL ON FUNCTION "public"."set_created_by"() TO "service_role";
 GRANT ALL ON FUNCTION "public"."set_updated_by"() TO "anon";
 GRANT ALL ON FUNCTION "public"."set_updated_by"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."set_updated_by"() TO "service_role";
+
+
+
 
 
 
