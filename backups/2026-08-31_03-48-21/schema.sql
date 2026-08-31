@@ -58,6 +58,13 @@ CREATE EXTENSION IF NOT EXISTS "pgjwt" WITH SCHEMA "extensions";
 
 
 
+CREATE EXTENSION IF NOT EXISTS "postgres_fdw" WITH SCHEMA "public";
+
+
+
+
+
+
 CREATE EXTENSION IF NOT EXISTS "supabase_vault" WITH SCHEMA "vault";
 
 
@@ -1546,6 +1553,41 @@ GRANT ALL ON FUNCTION "public"."is_email_taken"("p_email" "text") TO "service_ro
 
 
 
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect_all"() TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect_all"() TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect_all"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect_all"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."postgres_fdw_get_connections"(OUT "server_name" "text", OUT "valid" boolean) TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_get_connections"(OUT "server_name" "text", OUT "valid" boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_get_connections"(OUT "server_name" "text", OUT "valid" boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_get_connections"(OUT "server_name" "text", OUT "valid" boolean) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."postgres_fdw_handler"() TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_handler"() TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_handler"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_handler"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."postgres_fdw_validator"("text"[], "oid") TO "postgres";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_validator"("text"[], "oid") TO "anon";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_validator"("text"[], "oid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."postgres_fdw_validator"("text"[], "oid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "anon";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "service_role";
@@ -1561,6 +1603,9 @@ GRANT ALL ON FUNCTION "public"."set_created_by"() TO "service_role";
 GRANT ALL ON FUNCTION "public"."set_updated_by"() TO "anon";
 GRANT ALL ON FUNCTION "public"."set_updated_by"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."set_updated_by"() TO "service_role";
+
+
+
 
 
 
