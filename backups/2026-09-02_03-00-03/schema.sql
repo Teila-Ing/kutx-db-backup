@@ -980,6 +980,24 @@ ALTER TABLE ONLY "public"."zones_plan"
 
 
 
+CREATE POLICY "Comments - Create by project members or kutx_super_admin" ON "public"."v2_comments" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_comments"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Comments - Read by project members or kutx_super_admin" ON "public"."v2_comments" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_comments"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Comments - Update by project members or kutx_super_admin" ON "public"."v2_comments" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_comments"."record_id"))) AS "get_my_project_role") IS NOT NULL))) WITH CHECK ((( SELECT "auth"."uid"() AS "uid") = "author_id"));
+
+
+
 CREATE POLICY "Enable del access for all users" ON "public"."doc_to_review" FOR DELETE TO "authenticated" USING (true);
 
 
@@ -993,10 +1011,6 @@ CREATE POLICY "Enable del access for all users" ON "public"."v2_project_themes" 
 
 
 CREATE POLICY "Enable del access for all users" ON "public"."v2_themes" FOR DELETE TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable delete access for all users" ON "public"."v2_photos" FOR DELETE TO "authenticated" USING (true);
 
 
 
@@ -1044,23 +1058,11 @@ CREATE POLICY "Enable insert for authenticated users only" ON "public"."project_
 
 
 
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_comments" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_photos" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
 CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_project_themes" FOR INSERT TO "authenticated" WITH CHECK (true);
 
 
 
 CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_record_users" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_records" FOR INSERT TO "authenticated" WITH CHECK (true);
 
 
 
@@ -1096,23 +1098,11 @@ CREATE POLICY "Enable read access for all users" ON "public"."sites" FOR SELECT 
 
 
 
-CREATE POLICY "Enable read access for all users" ON "public"."v2_comments" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable read access for all users" ON "public"."v2_photos" FOR SELECT TO "authenticated" USING (true);
-
-
-
 CREATE POLICY "Enable read access for all users" ON "public"."v2_project_themes" FOR SELECT TO "authenticated" USING (true);
 
 
 
 CREATE POLICY "Enable read access for all users" ON "public"."v2_record_users" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable read access for all users" ON "public"."v2_records" FOR SELECT TO "authenticated" USING (true);
 
 
 
@@ -1136,10 +1126,6 @@ CREATE POLICY "Enable update access for all users" ON "public"."project_phases" 
 
 
 
-CREATE POLICY "Enable update access for all users" ON "public"."v2_photos" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
 CREATE POLICY "Enable update access for all users" ON "public"."v2_project_themes" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
 
 
@@ -1148,15 +1134,7 @@ CREATE POLICY "Enable update access for all users" ON "public"."v2_record_users"
 
 
 
-CREATE POLICY "Enable update access for all users" ON "public"."v2_records" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
 CREATE POLICY "Enable update for authenticated users only" ON "public"."project_members" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable update for authenticated users only" ON "public"."v2_comments" FOR UPDATE TO "authenticated" USING (true) WITH CHECK ((( SELECT "auth"."uid"() AS "uid") = "author_id"));
 
 
 
@@ -1184,6 +1162,32 @@ CREATE POLICY "Members - management by project_admin or kutx_super_admin" ON "pu
 
 
 
+CREATE POLICY "Photos - Create by project members or kutx_super_admin" ON "public"."v2_photos" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_photos"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Photos - Delete by project members or kutx_super_admin" ON "public"."v2_photos" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_photos"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Photos - Read by project members or kutx_super_admin" ON "public"."v2_photos" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_photos"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Photos - Update by project members or kutx_super_admin" ON "public"."v2_photos" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_photos"."record_id"))) AS "get_my_project_role") IS NOT NULL))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_photos"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
 CREATE POLICY "Profiles - update by itself or kutx_super_admin" ON "public"."profiles" FOR UPDATE TO "authenticated" USING ((("auth"."uid"() = "id") OR (( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text")));
 
 
@@ -1197,6 +1201,18 @@ CREATE POLICY "Projects - Read my projects or kutx_super_admin" ON "public"."pro
 
 
 CREATE POLICY "Projects - Update/Delete by project_admin or kutx_super_admin" ON "public"."projects" TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("projects"."id") AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
+CREATE POLICY "Records - Create by project members or kutx_super_admin" ON "public"."v2_records" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_records"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Records - Read by project members or kutx_super_admin" ON "public"."v2_records" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_records"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Records - Update by project members or kutx_super_admin" ON "public"."v2_records" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_records"."project_id") AS "get_my_project_role") IS NOT NULL))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_records"."project_id") AS "get_my_project_role") IS NOT NULL)));
 
 
 
