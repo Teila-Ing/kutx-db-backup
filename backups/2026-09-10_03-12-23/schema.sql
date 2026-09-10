@@ -88,6 +88,22 @@ CREATE TYPE "public"."project_role_enum" AS ENUM (
 ALTER TYPE "public"."project_role_enum" OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."generate_short_id"("prefix" "text") RETURNS "text"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  -- Plain random() is fine here (no need for pgcrypto's gen_random_bytes): this is a short,
+  -- human-facing code, not a security credential, and modulo bias is not a concern for a decimal
+  -- digit generated straight from a uniform float in [0, 1).
+  return prefix || lpad(floor(random() * 10000000)::text, 7, '0');
+end;
+$$;
+
+
+ALTER FUNCTION "public"."generate_short_id"("prefix" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_my_platform_role"() RETURNS "text"
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
@@ -453,7 +469,9 @@ CREATE TABLE IF NOT EXISTS "public"."projects" (
     "active" boolean DEFAULT true NOT NULL,
     "current_phase_name" "text",
     "latitude" double precision,
-    "longitude" double precision
+    "longitude" double precision,
+    "short_id" "text" DEFAULT "public"."generate_short_id"('p'::"text") NOT NULL,
+    CONSTRAINT "projects_short_id_format_check" CHECK (("short_id" ~ '^p[0-9]{7}$'::"text"))
 );
 
 
@@ -599,7 +617,9 @@ CREATE TABLE IF NOT EXISTS "public"."v2_records" (
     "document_id" "uuid",
     "metadata" "jsonb" DEFAULT '{}'::"jsonb",
     "phase_name" "text" DEFAULT ''::"text",
-    "details" "jsonb" DEFAULT '{}'::"jsonb"
+    "details" "jsonb" DEFAULT '{}'::"jsonb",
+    "short_id" "text" DEFAULT "public"."generate_short_id"('r'::"text") NOT NULL,
+    CONSTRAINT "v2_records_short_id_format_check" CHECK (("short_id" ~ '^r[0-9]{7}$'::"text"))
 );
 
 
@@ -690,6 +710,11 @@ ALTER TABLE ONLY "public"."projects"
 
 
 
+ALTER TABLE ONLY "public"."projects"
+    ADD CONSTRAINT "projects_short_id_key" UNIQUE ("short_id");
+
+
+
 ALTER TABLE ONLY "public"."record_field_config"
     ADD CONSTRAINT "record_field_config_pkey" PRIMARY KEY ("id");
 
@@ -740,6 +765,11 @@ ALTER TABLE ONLY "public"."v2_records"
 
 
 
+ALTER TABLE ONLY "public"."v2_records"
+    ADD CONSTRAINT "v2_records_short_id_key" UNIQUE ("short_id");
+
+
+
 ALTER TABLE "public"."v2_records"
     ADD CONSTRAINT "v2_records_target_type_check" CHECK (("target_type" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text"]))) NOT VALID;
 
@@ -769,6 +799,10 @@ CREATE INDEX "idx_project_members_email" ON "public"."project_members" USING "bt
 
 
 CREATE INDEX "idx_project_members_user_id" ON "public"."project_members" USING "btree" ("user_id");
+
+
+
+CREATE INDEX "idx_v2_records_project_id" ON "public"."v2_records" USING "btree" ("project_id");
 
 
 
@@ -1536,6 +1570,12 @@ GRANT USAGE ON SCHEMA "public" TO "service_role";
 
 
 
+
+
+
+GRANT ALL ON FUNCTION "public"."generate_short_id"("prefix" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."generate_short_id"("prefix" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."generate_short_id"("prefix" "text") TO "service_role";
 
 
 
