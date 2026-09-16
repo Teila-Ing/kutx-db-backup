@@ -290,7 +290,9 @@ CREATE TABLE IF NOT EXISTS "public"."building_plans" (
     "created_by" "uuid",
     "updated_by" "uuid",
     "type" "text",
-    "sort_order" bigint
+    "sort_order" bigint,
+    "tool" "text" NOT NULL,
+    CONSTRAINT "building_plans_tool_check" CHECK (("tool" = ANY (ARRAY['diag'::"text", 'recept'::"text"])))
 );
 
 
@@ -771,7 +773,7 @@ ALTER TABLE ONLY "public"."v2_records"
 
 
 ALTER TABLE "public"."v2_records"
-    ADD CONSTRAINT "v2_records_target_type_check" CHECK (("target_type" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text"]))) NOT VALID;
+    ADD CONSTRAINT "v2_records_target_type_check" CHECK (("target_type" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text", 'building_snag'::"text"]))) NOT VALID;
 
 
 
