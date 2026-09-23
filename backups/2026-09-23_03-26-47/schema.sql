@@ -218,6 +218,78 @@ CREATE OR REPLACE FUNCTION "public"."is_email_taken"("p_email" "text") RETURNS b
 ALTER FUNCTION "public"."is_email_taken"("p_email" "text") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."next_record_scope_number"("p_project_id" "uuid", "p_scope_key" "text") RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+declare
+  v_next integer;
+begin
+  insert into public.v2_record_scope_counters as c (project_id, scope_key, last_number)
+  values (p_project_id, p_scope_key, 1)
+  on conflict (project_id, scope_key) do update set last_number = c.last_number + 1
+  returning c.last_number into v_next;
+
+  return v_next;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."next_record_scope_number"("p_project_id" "uuid", "p_scope_key" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."preserve_record_scope_number"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+declare
+  v_old_scope text;
+  v_new_scope text;
+begin
+  v_old_scope := public.record_scope_key(old.target_type, old.document_id);
+  v_new_scope := public.record_scope_key(new.target_type, new.document_id);
+
+  if new.project_id is distinct from old.project_id or v_new_scope is distinct from v_old_scope then
+    -- The record moved to a different numbering scope (target_type or document_id changed) -
+    -- release the old number as a permanent gap in the old scope and draw a fresh one in the new.
+    if new.project_id is null then
+      new.scope_number := null;
+    else
+      new.scope_number := public.next_record_scope_number(new.project_id, v_new_scope);
+    end if;
+  elsif old.scope_number is not null then
+    -- Scope unchanged and already numbered: immutable, regardless of what the UPDATE's SET clause
+    -- said (a plain "send every column" update that echoes the same value back, or an explicit
+    -- attempt to overwrite it).
+    new.scope_number := old.scope_number;
+  end if;
+  -- else: scope unchanged and OLD.scope_number was NULL (never assigned - e.g. a row loaded by a
+  -- process that bypassed the INSERT trigger, later backfilled by an explicit UPDATE) - nothing to
+  -- preserve, so the UPDATE's own value is left as-is.
+
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."preserve_record_scope_number"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO 'public'
+    AS $$
+  select case
+    when p_target_type = 'document' and p_document_id is not null
+      then 'doc:' || p_document_id::text
+    else p_target_type
+  end;
+$$;
+
+
+ALTER FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."rls_auto_enable"() RETURNS "event_trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog'
@@ -265,6 +337,28 @@ $$;
 ALTER FUNCTION "public"."set_created_by"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."set_record_scope_number"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  if new.project_id is null then
+    new.scope_number := null;
+    return new;
+  end if;
+
+  new.scope_number := public.next_record_scope_number(
+    new.project_id,
+    public.record_scope_key(new.target_type, new.document_id)
+  );
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."set_record_scope_number"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."set_updated_by"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     AS $$
@@ -290,7 +384,9 @@ CREATE TABLE IF NOT EXISTS "public"."building_plans" (
     "created_by" "uuid",
     "updated_by" "uuid",
     "type" "text",
-    "sort_order" bigint
+    "sort_order" bigint,
+    "tool" "text" NOT NULL,
+    CONSTRAINT "building_plans_tool_check" CHECK (("tool" = ANY (ARRAY['diag'::"text", 'recept'::"text"])))
 );
 
 
@@ -589,6 +685,16 @@ CREATE TABLE IF NOT EXISTS "public"."v2_project_themes" (
 ALTER TABLE "public"."v2_project_themes" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."v2_record_scope_counters" (
+    "project_id" "uuid" NOT NULL,
+    "scope_key" "text" NOT NULL,
+    "last_number" integer DEFAULT 0 NOT NULL
+);
+
+
+ALTER TABLE "public"."v2_record_scope_counters" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."v2_record_users" (
     "record_id" "uuid" NOT NULL,
     "user_id" "uuid" NOT NULL,
@@ -619,6 +725,8 @@ CREATE TABLE IF NOT EXISTS "public"."v2_records" (
     "phase_name" "text" DEFAULT ''::"text",
     "details" "jsonb" DEFAULT '{}'::"jsonb",
     "short_id" "text" DEFAULT "public"."generate_short_id"('r'::"text") NOT NULL,
+    "scope_number" integer,
+    CONSTRAINT "v2_records_scope_number_positive_check" CHECK ((("scope_number" IS NULL) OR ("scope_number" > 0))),
     CONSTRAINT "v2_records_short_id_format_check" CHECK (("short_id" ~ '^r[0-9]{7}$'::"text"))
 );
 
@@ -755,6 +863,11 @@ ALTER TABLE ONLY "public"."v2_project_themes"
 
 
 
+ALTER TABLE ONLY "public"."v2_record_scope_counters"
+    ADD CONSTRAINT "v2_record_scope_counters_pkey" PRIMARY KEY ("project_id", "scope_key");
+
+
+
 ALTER TABLE ONLY "public"."v2_record_users"
     ADD CONSTRAINT "v2_record_users_pkey" PRIMARY KEY ("record_id", "user_id");
 
@@ -771,7 +884,7 @@ ALTER TABLE ONLY "public"."v2_records"
 
 
 ALTER TABLE "public"."v2_records"
-    ADD CONSTRAINT "v2_records_target_type_check" CHECK (("target_type" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text"]))) NOT VALID;
+    ADD CONSTRAINT "v2_records_target_type_check" CHECK (("target_type" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text", 'building_snag'::"text"]))) NOT VALID;
 
 
 
@@ -807,6 +920,10 @@ CREATE INDEX "idx_v2_records_project_id" ON "public"."v2_records" USING "btree" 
 
 
 CREATE INDEX "project_phases_project_id_idx" ON "public"."project_phases" USING "btree" ("project_id");
+
+
+
+CREATE UNIQUE INDEX "v2_records_scope_number_key" ON "public"."v2_records" USING "btree" ("project_id", "public"."record_scope_key"("target_type", "document_id"), "scope_number");
 
 
 
@@ -851,6 +968,14 @@ CREATE OR REPLACE TRIGGER "set_updated_by_projects" BEFORE UPDATE ON "public"."p
 
 
 CREATE OR REPLACE TRIGGER "set_updated_by_sites" BEFORE UPDATE ON "public"."sites" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_by"();
+
+
+
+CREATE OR REPLACE TRIGGER "trigger_preserve_record_scope_number" BEFORE UPDATE ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."preserve_record_scope_number"();
+
+
+
+CREATE OR REPLACE TRIGGER "trigger_set_record_scope_number" BEFORE INSERT ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."set_record_scope_number"();
 
 
 
@@ -956,6 +1081,11 @@ ALTER TABLE ONLY "public"."v2_project_themes"
 
 ALTER TABLE ONLY "public"."v2_project_themes"
     ADD CONSTRAINT "v2_project_themes_theme_id_fkey" FOREIGN KEY ("theme_id") REFERENCES "public"."v2_themes"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."v2_record_scope_counters"
+    ADD CONSTRAINT "v2_record_scope_counters_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
 
 
 
@@ -1348,6 +1478,9 @@ ALTER TABLE "public"."v2_photos" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."v2_project_themes" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."v2_record_scope_counters" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."v2_record_users" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1609,6 +1742,12 @@ GRANT ALL ON FUNCTION "public"."is_email_taken"("p_email" "text") TO "service_ro
 
 
 
+GRANT ALL ON FUNCTION "public"."next_record_scope_number"("p_project_id" "uuid", "p_scope_key" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."next_record_scope_number"("p_project_id" "uuid", "p_scope_key" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."next_record_scope_number"("p_project_id" "uuid", "p_scope_key" "text") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "postgres";
 GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "anon";
 GRANT ALL ON FUNCTION "public"."postgres_fdw_disconnect"("text") TO "authenticated";
@@ -1644,6 +1783,18 @@ GRANT ALL ON FUNCTION "public"."postgres_fdw_validator"("text"[], "oid") TO "ser
 
 
 
+GRANT ALL ON FUNCTION "public"."preserve_record_scope_number"() TO "anon";
+GRANT ALL ON FUNCTION "public"."preserve_record_scope_number"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."preserve_record_scope_number"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "anon";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "service_role";
@@ -1653,6 +1804,12 @@ GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "service_role";
 GRANT ALL ON FUNCTION "public"."set_created_by"() TO "anon";
 GRANT ALL ON FUNCTION "public"."set_created_by"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."set_created_by"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."set_record_scope_number"() TO "anon";
+GRANT ALL ON FUNCTION "public"."set_record_scope_number"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."set_record_scope_number"() TO "service_role";
 
 
 
@@ -1766,6 +1923,10 @@ GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public".
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_project_themes" TO "anon";
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_project_themes" TO "authenticated";
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_project_themes" TO "service_role";
+
+
+
+GRANT REFERENCES,TRIGGER,TRUNCATE ON TABLE "public"."v2_record_scope_counters" TO "service_role";
 
 
 
