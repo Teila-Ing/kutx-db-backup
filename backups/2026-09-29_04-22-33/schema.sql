@@ -19,6 +19,12 @@ CREATE SCHEMA IF NOT EXISTS "kutx";
 ALTER SCHEMA "kutx" OWNER TO "postgres";
 
 
+CREATE SCHEMA IF NOT EXISTS "migration_staging";
+
+
+ALTER SCHEMA "migration_staging" OWNER TO "postgres";
+
+
 COMMENT ON SCHEMA "public" IS 'standard public schema';
 
 
@@ -374,6 +380,332 @@ ALTER FUNCTION "public"."set_updated_by"() OWNER TO "postgres";
 SET default_tablespace = '';
 
 SET default_table_access_method = "heap";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."batiments" (
+    "id" "uuid",
+    "site_id" "uuid",
+    "nom" "text",
+    "usage_actuel" "text",
+    "historique" "text",
+    "project_id" "uuid",
+    "created_at" timestamp with time zone,
+    "created_by" "uuid",
+    "updated_by" "uuid"
+);
+
+
+ALTER TABLE "migration_staging"."batiments" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."doc_to_review" (
+    "id" "uuid",
+    "created_at" timestamp with time zone,
+    "uploaded_by" "uuid",
+    "doc_name" "text",
+    "doc_link" "text",
+    "phase_name" "text",
+    "project_id" "uuid",
+    "assigned_users" "text"[],
+    "review_state" "text",
+    "read_only" boolean,
+    "is_external_upload" boolean,
+    "deadline" "date"
+);
+
+
+ALTER TABLE "migration_staging"."doc_to_review" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."doc_to_review_state" (
+    "id" "uuid",
+    "doc_to_review_id" "uuid",
+    "user_id" "uuid",
+    "state" "text",
+    "updated_at" timestamp without time zone
+);
+
+
+ALTER TABLE "migration_staging"."doc_to_review_state" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."legacy_auth_identities" (
+    "provider_id" "text",
+    "user_id" "uuid",
+    "identity_data" "jsonb",
+    "provider" "text",
+    "last_sign_in_at" timestamp with time zone,
+    "created_at" timestamp with time zone,
+    "updated_at" timestamp with time zone,
+    "email" "text",
+    "id" "uuid"
+);
+
+
+ALTER TABLE "migration_staging"."legacy_auth_identities" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."legacy_auth_users" (
+    "instance_id" "uuid",
+    "id" "uuid",
+    "aud" character varying(255),
+    "role" character varying(255),
+    "email" character varying(255),
+    "encrypted_password" character varying(255),
+    "email_confirmed_at" timestamp with time zone,
+    "invited_at" timestamp with time zone,
+    "confirmation_token" character varying(255),
+    "confirmation_sent_at" timestamp with time zone,
+    "recovery_token" character varying(255),
+    "recovery_sent_at" timestamp with time zone,
+    "email_change_token_new" character varying(255),
+    "email_change" character varying(255),
+    "email_change_sent_at" timestamp with time zone,
+    "last_sign_in_at" timestamp with time zone,
+    "raw_app_meta_data" "jsonb",
+    "raw_user_meta_data" "jsonb",
+    "is_super_admin" boolean,
+    "created_at" timestamp with time zone,
+    "updated_at" timestamp with time zone,
+    "phone" "text",
+    "phone_confirmed_at" timestamp with time zone,
+    "phone_change" "text",
+    "phone_change_token" character varying(255),
+    "phone_change_sent_at" timestamp with time zone,
+    "confirmed_at" timestamp with time zone,
+    "email_change_token_current" character varying(255),
+    "email_change_confirm_status" smallint,
+    "banned_until" timestamp with time zone,
+    "reauthentication_token" character varying(255),
+    "reauthentication_sent_at" timestamp with time zone,
+    "is_sso_user" boolean,
+    "deleted_at" timestamp with time zone,
+    "is_anonymous" boolean
+);
+
+
+ALTER TABLE "migration_staging"."legacy_auth_users" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."plans_batiment" (
+    "id" "uuid",
+    "batiment_id" "uuid",
+    "nom" "text",
+    "image_url" "text",
+    "created_by" "uuid",
+    "updated_by" "uuid",
+    "type" "text",
+    "ordre" bigint,
+    "image_plan_path" "text"
+);
+
+
+ALTER TABLE "migration_staging"."plans_batiment" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."project_members" (
+    "id" "uuid",
+    "project_id" "uuid",
+    "user_id" "uuid",
+    "invitation_email" "text",
+    "status" "text",
+    "role" "text",
+    "project_role" "public"."project_role_enum"
+);
+
+
+ALTER TABLE "migration_staging"."project_members" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."projects" (
+    "id" "uuid",
+    "nom" "text",
+    "adresse" "text",
+    "annee_construction" "text",
+    "description" "text",
+    "date_creation" timestamp with time zone,
+    "created_by" "uuid",
+    "updated_by" "uuid",
+    "active" boolean,
+    "current_phase_name" "text",
+    "latitude" double precision,
+    "longitude" double precision
+);
+
+
+ALTER TABLE "migration_staging"."projects" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."releve_field_config" (
+    "id" "uuid",
+    "project_id" "uuid",
+    "key" "text",
+    "label" "text",
+    "type" "text",
+    "options" "jsonb",
+    "required" boolean,
+    "sort_order" integer,
+    "created_at" timestamp with time zone,
+    "updated_at" timestamp with time zone
+);
+
+
+ALTER TABLE "migration_staging"."releve_field_config" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."run_ledger" (
+    "scope" "text" NOT NULL,
+    "table_name" "text" NOT NULL,
+    "rows_seen" integer DEFAULT 0 NOT NULL,
+    "rows_inserted" integer DEFAULT 0 NOT NULL,
+    "rows_skipped" integer DEFAULT 0 NOT NULL,
+    "started_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "finished_at" timestamp with time zone
+);
+
+
+ALTER TABLE "migration_staging"."run_ledger" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."sites" (
+    "id" "uuid",
+    "nom" "text",
+    "project_id" "uuid",
+    "created_at" timestamp with time zone,
+    "created_by" "uuid",
+    "updated_by" "uuid"
+);
+
+
+ALTER TABLE "migration_staging"."sites" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."target_before_ids" (
+    "scope" "text" NOT NULL,
+    "table_name" "text" NOT NULL,
+    "id" "uuid" NOT NULL
+);
+
+
+ALTER TABLE "migration_staging"."target_before_ids" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."target_before_keys" (
+    "scope" "text" NOT NULL,
+    "table_name" "text" NOT NULL,
+    "key_json" "jsonb" NOT NULL
+);
+
+
+ALTER TABLE "migration_staging"."target_before_keys" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."user_id_map" (
+    "legacy_id" "uuid" NOT NULL,
+    "target_id" "uuid" NOT NULL,
+    "reason" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "user_id_map_reason_check" CHECK (("reason" = ANY (ARRAY['carried'::"text", 'email_collision'::"text"])))
+);
+
+
+ALTER TABLE "migration_staging"."user_id_map" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."v2_commentaires" (
+    "id" "uuid",
+    "releve_id" "uuid",
+    "texte" "text",
+    "auteur_id" "uuid",
+    "created_at" timestamp with time zone,
+    "updated_at" timestamp with time zone
+);
+
+
+ALTER TABLE "migration_staging"."v2_commentaires" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."v2_photos" (
+    "id" "uuid",
+    "releve_id" "uuid",
+    "url" "text",
+    "legende" "text",
+    "created_by" "uuid",
+    "created_at" timestamp with time zone
+);
+
+
+ALTER TABLE "migration_staging"."v2_photos" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."v2_project_themes" (
+    "project_id" "uuid",
+    "theme_id" "uuid",
+    "cible" "text"
+);
+
+
+ALTER TABLE "migration_staging"."v2_project_themes" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."v2_releves" (
+    "id" "uuid",
+    "cible_type" "text",
+    "project_id" "uuid",
+    "site_id" "uuid",
+    "batiment_id" "uuid",
+    "plan_id" "uuid",
+    "auteur_id" "uuid",
+    "pos_x" double precision,
+    "pos_y" double precision,
+    "impact" integer,
+    "description" "text",
+    "theme_name" "text",
+    "created_at" timestamp with time zone,
+    "updated_at" timestamp with time zone,
+    "document_id" "uuid",
+    "metadata" "jsonb",
+    "phase_name" "text",
+    "details" "jsonb"
+);
+
+
+ALTER TABLE "migration_staging"."v2_releves" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."v2_themes" (
+    "id" "uuid",
+    "nom" "text",
+    "applicable_a" "text",
+    "project_id" "uuid"
+);
+
+
+ALTER TABLE "migration_staging"."v2_themes" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."v2_utilisateurs_releves" (
+    "releve_id" "uuid",
+    "user_id" "uuid",
+    "created_at" timestamp with time zone
+);
+
+
+ALTER TABLE "migration_staging"."v2_utilisateurs_releves" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "migration_staging"."zones_plan" (
+    "type" "text",
+    "titre" "text",
+    "points" "jsonb",
+    "plan_id" "uuid",
+    "created_at" timestamp with time zone,
+    "created_by" "uuid",
+    "id" "uuid"
+);
+
+
+ALTER TABLE "migration_staging"."zones_plan" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."building_plans" (
@@ -760,6 +1092,26 @@ ALTER TABLE "public"."zones_plan" OWNER TO "postgres";
 
 
 COMMENT ON TABLE "public"."zones_plan" IS 'Liste des zones des plans';
+
+
+
+ALTER TABLE ONLY "migration_staging"."run_ledger"
+    ADD CONSTRAINT "run_ledger_pkey" PRIMARY KEY ("scope", "table_name");
+
+
+
+ALTER TABLE ONLY "migration_staging"."target_before_ids"
+    ADD CONSTRAINT "target_before_ids_pkey" PRIMARY KEY ("scope", "table_name", "id");
+
+
+
+ALTER TABLE ONLY "migration_staging"."target_before_keys"
+    ADD CONSTRAINT "target_before_keys_pkey" PRIMARY KEY ("scope", "table_name", "key_json");
+
+
+
+ALTER TABLE ONLY "migration_staging"."user_id_map"
+    ADD CONSTRAINT "user_id_map_pkey" PRIMARY KEY ("legacy_id");
 
 
 
