@@ -94,6 +94,69 @@ CREATE TYPE "public"."project_role_enum" AS ENUM (
 ALTER TYPE "public"."project_role_enum" OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."check_snag_lot_project"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  if new.lot_id is not null and not exists (
+    select 1
+    from public.project_lots l
+    join public.v2_records r on r.id = new.record_id
+    where l.id = new.lot_id and l.project_id = r.project_id
+  ) then
+    raise exception 'lot % does not belong to the project of record %', new.lot_id, new.record_id
+      using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."check_snag_lot_project"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text" DEFAULT NULL::"text", "p_building_id" "uuid" DEFAULT NULL::"uuid", "p_plan_id" "uuid" DEFAULT NULL::"uuid", "p_pos_x" double precision DEFAULT NULL::double precision, "p_pos_y" double precision DEFAULT NULL::double precision, "p_phase_name" "text" DEFAULT NULL::"text", "p_author_id" "uuid" DEFAULT NULL::"uuid", "p_details" "jsonb" DEFAULT NULL::"jsonb", "p_created_at" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_status" "text" DEFAULT NULL::"text", "p_contractor" "text" DEFAULT NULL::"text", "p_due_date" "date" DEFAULT NULL::"date", "p_observed_at" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_lot_id" "uuid" DEFAULT NULL::"uuid") RETURNS TABLE("scope_number" integer)
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  insert into public.v2_records (
+    id, short_id, project_id, target_type, building_id, plan_id, pos_x, pos_y,
+    document_id, metadata, description, theme_name, phase_name, author_id, details,
+    created_at, observed_at
+  ) values (
+    p_id,
+    -- Mirrors the short_id column's own default (generate_short_id('r')).
+    coalesce(p_short_id, public.generate_short_id('r')),
+    p_project_id,
+    'building_snag',
+    p_building_id,
+    p_plan_id,
+    p_pos_x,
+    p_pos_y,
+    null,
+    null,
+    p_description,
+    p_theme_name,
+    p_phase_name,
+    p_author_id,
+    p_details,
+    coalesce(p_created_at, now()),
+    coalesce(p_observed_at, now())
+  );
+
+  insert into public.v2_record_snags (record_id, status, contractor, due_date, lot_id)
+  values (p_id, coalesce(p_status, 'raised'), p_contractor, p_due_date, p_lot_id);
+
+  return query select v2_records.scope_number from public.v2_records where v2_records.id = p_id;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."generate_short_id"("prefix" "text") RETURNS "text"
     LANGUAGE "plpgsql"
     SET "search_path" TO 'public'
@@ -952,6 +1015,46 @@ CREATE TABLE IF NOT EXISTS "public"."profiles" (
 ALTER TABLE "public"."profiles" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."project_contractors" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "project_id" "uuid" NOT NULL,
+    "name" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "project_contractors_name_check" CHECK (("btrim"("name") <> ''::"text"))
+);
+
+
+ALTER TABLE "public"."project_contractors" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."project_lots" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "project_id" "uuid" NOT NULL,
+    "number" integer NOT NULL,
+    "label" "text",
+    "contractor_id" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "project_lots_number_check" CHECK (("number" > 0))
+);
+
+
+ALTER TABLE "public"."project_lots" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."project_lots"."number" IS 'The N of "Lot N". Assigned by the client as max(number)+1 per project; gaps left by a deletion are kept.';
+
+
+
+COMMENT ON COLUMN "public"."project_lots"."label" IS 'Free title of the lot (e.g. "Gros oeuvre"), shown after the number when filled in.';
+
+
+
+COMMENT ON COLUMN "public"."project_lots"."contractor_id" IS 'The contractor in charge of the lot, if any. A lot has at most one contractor.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."project_members" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "project_id" "uuid" NOT NULL,
@@ -1037,11 +1140,30 @@ CREATE TABLE IF NOT EXISTS "public"."record_field_config" (
     "sort_order" integer DEFAULT 0 NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"(),
     "updated_at" timestamp with time zone DEFAULT "now"(),
+    "tool" "text",
+    "superseded" boolean DEFAULT false NOT NULL,
+    "default_value" "jsonb",
+    CONSTRAINT "record_field_config_default_value_check" CHECK ((("default_value" IS NULL) OR
+CASE "type"
+    WHEN 'number'::"text" THEN ("jsonb_typeof"("default_value") = 'number'::"text")
+    WHEN 'boolean'::"text" THEN ("jsonb_typeof"("default_value") = 'boolean'::"text")
+    WHEN 'date'::"text" THEN (("jsonb_typeof"("default_value") = 'string'::"text") AND (("default_value" #>> '{}'::"text"[]) ~ '^\d{4}-\d{2}-\d{2}$'::"text"))
+    ELSE ("jsonb_typeof"("default_value") = 'string'::"text")
+END)),
+    CONSTRAINT "record_field_config_tool_check" CHECK ((("tool" IS NULL) OR ("tool" = ANY (ARRAY['diag'::"text", 'recept'::"text", 'doc'::"text"])))),
     CONSTRAINT "record_field_config_type_check" CHECK (("type" = ANY (ARRAY['text'::"text", 'number'::"text", 'boolean'::"text", 'select'::"text", 'date'::"text"])))
 );
 
 
 ALTER TABLE "public"."record_field_config" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."record_field_config"."superseded" IS 'True for a legacy field replaced by a typed column (the snag lifecycle in v2_record_snags). Kept so the values already saved in v2_records.details stay identifiable, but never offered as a field.';
+
+
+
+COMMENT ON COLUMN "public"."record_field_config"."default_value" IS 'Value prefilled in v2_records.details[key] when a record is created; NULL = no default. JSON type follows `type` (number, boolean, string; date as YYYY-MM-DD). A select default being one of `options` is checked by the admin screen, not here.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."sites" (
@@ -1119,6 +1241,41 @@ CREATE TABLE IF NOT EXISTS "public"."v2_record_scope_counters" (
 ALTER TABLE "public"."v2_record_scope_counters" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."v2_record_snags" (
+    "record_id" "uuid" NOT NULL,
+    "status" "text" DEFAULT 'raised'::"text" NOT NULL,
+    "contractor" "text",
+    "due_date" "date",
+    "lifted_at" timestamp with time zone,
+    "validated_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "target_type" "text" DEFAULT 'building_snag'::"text" NOT NULL,
+    "lot_id" "uuid",
+    CONSTRAINT "v2_record_snags_status_check" CHECK (("status" = ANY (ARRAY['raised'::"text", 'declared_lifted'::"text", 'lifted'::"text", 'rejected'::"text"]))),
+    CONSTRAINT "v2_record_snags_target_type_check" CHECK (("target_type" = 'building_snag'::"text"))
+);
+
+
+ALTER TABLE "public"."v2_record_snags" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."v2_record_snags" IS 'Reception ("réserve") lifecycle for a v2_records row with target_type = ''building_snag''. One row per snag, cascade-deleted with its parent record.';
+
+
+
+COMMENT ON COLUMN "public"."v2_record_snags"."status" IS 'raised: newly raised, not yet addressed. declared_lifted: the contractor declares it lifted. lifted: lifting confirmed by the maîtrise d''œuvre (or, before this migration, the maîtrise d''ouvrage - the source data distinguished the two but this column does not, see this migration''s header). rejected: lifting declared but rejected - not observed in the backfilled data, available for new snags.';
+
+
+
+COMMENT ON COLUMN "public"."v2_record_snags"."contractor" IS 'Free-text responsible contractor, kept for projects without lots (project_lots) and for snags without a lot. Backfilled from details->>''lot_entreprise''. When lot_id is set, the lot''s contractor takes precedence.';
+
+
+
+COMMENT ON COLUMN "public"."v2_record_snags"."lot_id" IS 'The lot of the snag; its contractor is the lot''s current one. When set, the free-text contractor column is no longer written.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."v2_record_users" (
     "record_id" "uuid" NOT NULL,
     "user_id" "uuid" NOT NULL,
@@ -1139,7 +1296,7 @@ CREATE TABLE IF NOT EXISTS "public"."v2_records" (
     "author_id" "uuid",
     "pos_x" double precision,
     "pos_y" double precision,
-    "impact" integer NOT NULL,
+    "impact" integer,
     "description" "text" NOT NULL,
     "theme_name" "text" NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"(),
@@ -1150,12 +1307,17 @@ CREATE TABLE IF NOT EXISTS "public"."v2_records" (
     "details" "jsonb" DEFAULT '{}'::"jsonb",
     "short_id" "text" DEFAULT "public"."generate_short_id"('r'::"text") NOT NULL,
     "scope_number" integer,
+    "observed_at" timestamp with time zone DEFAULT "now"(),
     CONSTRAINT "v2_records_scope_number_positive_check" CHECK ((("scope_number" IS NULL) OR ("scope_number" > 0))),
     CONSTRAINT "v2_records_short_id_format_check" CHECK (("short_id" ~ '^r[0-9]{7}$'::"text"))
 );
 
 
 ALTER TABLE "public"."v2_records" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."v2_records"."observed_at" IS 'When the point was observed on site, set by the device at capture time and editable (day only) for reception on desktop. created_at stays the technical date. Tools that do not set it get now() from the default.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."v2_themes" (
@@ -1242,6 +1404,31 @@ ALTER TABLE ONLY "public"."profiles"
 
 
 
+ALTER TABLE ONLY "public"."project_contractors"
+    ADD CONSTRAINT "project_contractors_id_project_id_key" UNIQUE ("id", "project_id");
+
+
+
+ALTER TABLE ONLY "public"."project_contractors"
+    ADD CONSTRAINT "project_contractors_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."project_contractors"
+    ADD CONSTRAINT "project_contractors_project_id_name_key" UNIQUE ("project_id", "name");
+
+
+
+ALTER TABLE ONLY "public"."project_lots"
+    ADD CONSTRAINT "project_lots_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."project_lots"
+    ADD CONSTRAINT "project_lots_project_id_number_key" UNIQUE ("project_id", "number");
+
+
+
 ALTER TABLE ONLY "public"."project_members"
     ADD CONSTRAINT "project_members_pkey" PRIMARY KEY ("id");
 
@@ -1312,8 +1499,18 @@ ALTER TABLE ONLY "public"."v2_record_scope_counters"
 
 
 
+ALTER TABLE ONLY "public"."v2_record_snags"
+    ADD CONSTRAINT "v2_record_snags_pkey" PRIMARY KEY ("record_id");
+
+
+
 ALTER TABLE ONLY "public"."v2_record_users"
     ADD CONSTRAINT "v2_record_users_pkey" PRIMARY KEY ("record_id", "user_id");
+
+
+
+ALTER TABLE ONLY "public"."v2_records"
+    ADD CONSTRAINT "v2_records_id_target_type_key" UNIQUE ("id", "target_type");
 
 
 
@@ -1363,7 +1560,15 @@ CREATE INDEX "idx_v2_records_project_id" ON "public"."v2_records" USING "btree" 
 
 
 
+CREATE INDEX "project_lots_contractor_id_idx" ON "public"."project_lots" USING "btree" ("contractor_id");
+
+
+
 CREATE INDEX "project_phases_project_id_idx" ON "public"."project_phases" USING "btree" ("project_id");
+
+
+
+CREATE INDEX "v2_record_snags_lot_id_idx" ON "public"."v2_record_snags" USING "btree" ("lot_id");
 
 
 
@@ -1423,6 +1628,10 @@ CREATE OR REPLACE TRIGGER "trigger_set_record_scope_number" BEFORE INSERT ON "pu
 
 
 
+CREATE OR REPLACE TRIGGER "v2_record_snags_check_lot_project" BEFORE INSERT OR UPDATE OF "lot_id" ON "public"."v2_record_snags" FOR EACH ROW EXECUTE FUNCTION "public"."check_snag_lot_project"();
+
+
+
 ALTER TABLE ONLY "public"."building_plans"
     ADD CONSTRAINT "building_plans_building_id_fkey" FOREIGN KEY ("building_id") REFERENCES "public"."buildings"("id") ON DELETE CASCADE;
 
@@ -1460,6 +1669,21 @@ ALTER TABLE ONLY "public"."doc_to_review"
 
 ALTER TABLE ONLY "public"."profiles"
     ADD CONSTRAINT "profiles_id_fkey" FOREIGN KEY ("id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."project_contractors"
+    ADD CONSTRAINT "project_contractors_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."project_lots"
+    ADD CONSTRAINT "project_lots_contractor_fk" FOREIGN KEY ("contractor_id", "project_id") REFERENCES "public"."project_contractors"("id", "project_id") ON DELETE SET NULL ("contractor_id");
+
+
+
+ALTER TABLE ONLY "public"."project_lots"
+    ADD CONSTRAINT "project_lots_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
 
 
 
@@ -1530,6 +1754,21 @@ ALTER TABLE ONLY "public"."v2_project_themes"
 
 ALTER TABLE ONLY "public"."v2_record_scope_counters"
     ADD CONSTRAINT "v2_record_scope_counters_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."v2_record_snags"
+    ADD CONSTRAINT "v2_record_snags_lot_id_fkey" FOREIGN KEY ("lot_id") REFERENCES "public"."project_lots"("id");
+
+
+
+ALTER TABLE ONLY "public"."v2_record_snags"
+    ADD CONSTRAINT "v2_record_snags_record_fk" FOREIGN KEY ("record_id", "target_type") REFERENCES "public"."v2_records"("id", "target_type") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."v2_record_snags"
+    ADD CONSTRAINT "v2_record_snags_validated_by_fkey" FOREIGN KEY ("validated_by") REFERENCES "public"."profiles"("id") ON DELETE SET NULL;
 
 
 
@@ -1800,6 +2039,22 @@ CREATE POLICY "Profiles - update by itself or kutx_super_admin" ON "public"."pro
 
 
 
+CREATE POLICY "Project contractors - Read by project members or kutx_super_adm" ON "public"."project_contractors" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_contractors"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Project contractors - Write by project_admin or kutx_super_admi" ON "public"."project_contractors" TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_contractors"."project_id") AS "get_my_project_role") = 'project_admin'::"text"))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_contractors"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
+CREATE POLICY "Project lots - Read by project members or kutx_super_admin" ON "public"."project_lots" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_lots"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Project lots - Write by project_admin or kutx_super_admin" ON "public"."project_lots" TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_lots"."project_id") AS "get_my_project_role") = 'project_admin'::"text"))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_lots"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
 CREATE POLICY "Projects - Create for kutx_creator or kutx_super_admin" ON "public"."projects" FOR INSERT TO "authenticated" WITH CHECK ((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = ANY (ARRAY['kutx_creator'::"text", 'kutx_super_admin'::"text"])));
 
 
@@ -1821,6 +2076,32 @@ CREATE POLICY "Records - Read by project members or kutx_super_admin" ON "public
 
 
 CREATE POLICY "Records - Update by project members or kutx_super_admin" ON "public"."v2_records" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_records"."project_id") AS "get_my_project_role") IS NOT NULL))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_records"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Snags - Create by project members or kutx_super_admin" ON "public"."v2_record_snags" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_snags"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Snags - Delete by project members or kutx_super_admin" ON "public"."v2_record_snags" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_snags"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Snags - Read by project members or kutx_super_admin" ON "public"."v2_record_snags" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_snags"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Snags - Update by project members or kutx_super_admin" ON "public"."v2_record_snags" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_snags"."record_id"))) AS "get_my_project_role") IS NOT NULL))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_snags"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
 
 
 
@@ -1894,6 +2175,12 @@ ALTER TABLE "public"."phases" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."profiles" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."project_contractors" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."project_lots" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."project_members" ENABLE ROW LEVEL SECURITY;
 
 
@@ -1923,6 +2210,9 @@ ALTER TABLE "public"."v2_project_themes" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."v2_record_scope_counters" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."v2_record_snags" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."v2_record_users" ENABLE ROW LEVEL SECURITY;
@@ -2150,6 +2440,18 @@ GRANT USAGE ON SCHEMA "public" TO "service_role";
 
 
 
+GRANT ALL ON FUNCTION "public"."check_snag_lot_project"() TO "anon";
+GRANT ALL ON FUNCTION "public"."check_snag_lot_project"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."check_snag_lot_project"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."generate_short_id"("prefix" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."generate_short_id"("prefix" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."generate_short_id"("prefix" "text") TO "service_role";
@@ -2323,6 +2625,16 @@ GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public".
 
 
 
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_contractors" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_contractors" TO "service_role";
+
+
+
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_lots" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_lots" TO "service_role";
+
+
+
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_members" TO "anon";
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_members" TO "authenticated";
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_members" TO "service_role";
@@ -2371,6 +2683,12 @@ GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public".
 
 
 GRANT REFERENCES,TRIGGER,TRUNCATE ON TABLE "public"."v2_record_scope_counters" TO "service_role";
+
+
+
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_record_snags" TO "anon";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."v2_record_snags" TO "authenticated";
+GRANT REFERENCES,TRIGGER,TRUNCATE ON TABLE "public"."v2_record_snags" TO "service_role";
 
 
 
