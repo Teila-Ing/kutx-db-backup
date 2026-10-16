@@ -94,7 +94,29 @@ CREATE TYPE "public"."project_role_enum" AS ENUM (
 ALTER TYPE "public"."project_role_enum" OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text" DEFAULT NULL::"text", "p_building_id" "uuid" DEFAULT NULL::"uuid", "p_plan_id" "uuid" DEFAULT NULL::"uuid", "p_pos_x" double precision DEFAULT NULL::double precision, "p_pos_y" double precision DEFAULT NULL::double precision, "p_phase_name" "text" DEFAULT NULL::"text", "p_author_id" "uuid" DEFAULT NULL::"uuid", "p_details" "jsonb" DEFAULT NULL::"jsonb", "p_created_at" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_status" "text" DEFAULT NULL::"text", "p_contractor" "text" DEFAULT NULL::"text", "p_due_date" "date" DEFAULT NULL::"date", "p_observed_at" timestamp with time zone DEFAULT NULL::timestamp with time zone) RETURNS TABLE("scope_number" integer)
+CREATE OR REPLACE FUNCTION "public"."check_snag_lot_project"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  if new.lot_id is not null and not exists (
+    select 1
+    from public.project_lots l
+    join public.v2_records r on r.id = new.record_id
+    where l.id = new.lot_id and l.project_id = r.project_id
+  ) then
+    raise exception 'lot % does not belong to the project of record %', new.lot_id, new.record_id
+      using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."check_snag_lot_project"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text" DEFAULT NULL::"text", "p_building_id" "uuid" DEFAULT NULL::"uuid", "p_plan_id" "uuid" DEFAULT NULL::"uuid", "p_pos_x" double precision DEFAULT NULL::double precision, "p_pos_y" double precision DEFAULT NULL::double precision, "p_phase_name" "text" DEFAULT NULL::"text", "p_author_id" "uuid" DEFAULT NULL::"uuid", "p_details" "jsonb" DEFAULT NULL::"jsonb", "p_created_at" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_status" "text" DEFAULT NULL::"text", "p_contractor" "text" DEFAULT NULL::"text", "p_due_date" "date" DEFAULT NULL::"date", "p_observed_at" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_lot_id" "uuid" DEFAULT NULL::"uuid") RETURNS TABLE("scope_number" integer)
     LANGUAGE "plpgsql"
     SET "search_path" TO 'public'
     AS $$
@@ -124,15 +146,15 @@ begin
     coalesce(p_observed_at, now())
   );
 
-  insert into public.v2_record_snags (record_id, status, contractor, due_date)
-  values (p_id, coalesce(p_status, 'raised'), p_contractor, p_due_date);
+  insert into public.v2_record_snags (record_id, status, contractor, due_date, lot_id)
+  values (p_id, coalesce(p_status, 'raised'), p_contractor, p_due_date, p_lot_id);
 
   return query select v2_records.scope_number from public.v2_records where v2_records.id = p_id;
 end;
 $$;
 
 
-ALTER FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone) OWNER TO "postgres";
+ALTER FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."generate_short_id"("prefix" "text") RETURNS "text"
@@ -204,50 +226,51 @@ ALTER FUNCTION "public"."handle_new_project"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."handle_new_user"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    AS $$BEGIN                                                                       
-      -- Idempotent profile write (UPSERT)                                      
-      INSERT INTO public.profiles (id, email, first_name, last_name, enterprise,
-  job_role,kutx_role)                                                                     
-      VALUES (                                                                  
-        NEW.id,                                                                 
-        NEW.email,                                                              
-        NEW.raw_user_meta_data->>'first_name',                                  
-        NEW.raw_user_meta_data->>'last_name',                                   
-        NEW.raw_user_meta_data->>'enterprise',                                  
-        NEW.raw_user_meta_data->>'job_role',
-        COALESCE(new.raw_app_meta_data->>'roleUser', 'kutx_user')                                     
-      )                                                                         
-      ON CONFLICT (id)                                                          
-      DO UPDATE SET                                                             
-        email = COALESCE(EXCLUDED.email, profiles.email),                       
-        first_name = COALESCE(EXCLUDED.first_name, profiles.first_name),        
-        last_name = COALESCE(EXCLUDED.last_name, profiles.last_name),           
-        enterprise = COALESCE(EXCLUDED.enterprise, profiles.enterprise),        
-        job_role = COALESCE(EXCLUDED.job_role, profiles.job_role),
-        kutx_role = EXCLUDED.kutx_role;
+    AS $$
+BEGIN
+  -- Idempotent profile write (UPSERT). kutx_role is only set when the row is created: afterwards
+  -- profiles.kutx_role is the source of truth and auth metadata never overwrites it.
+  INSERT INTO public.profiles (id, email, first_name, last_name, enterprise, job_role, kutx_role)
+  VALUES (
+    NEW.id,
+    NEW.email,
+    NEW.raw_user_meta_data->>'first_name',
+    NEW.raw_user_meta_data->>'last_name',
+    NEW.raw_user_meta_data->>'enterprise',
+    NEW.raw_user_meta_data->>'job_role',
+    COALESCE(NEW.raw_app_meta_data->>'roleUser', 'kutx_user')
+  )
+  ON CONFLICT (id)
+  DO UPDATE SET
+    email = COALESCE(EXCLUDED.email, profiles.email),
+    first_name = COALESCE(EXCLUDED.first_name, profiles.first_name),
+    last_name = COALESCE(EXCLUDED.last_name, profiles.last_name),
+    enterprise = COALESCE(EXCLUDED.enterprise, profiles.enterprise),
+    job_role = COALESCE(EXCLUDED.job_role, profiles.job_role);
 
-      IF (TG_OP = 'INSERT') THEN
-        UPDATE public.project_members
-        SET
-          user_id = NEW.id,
-          status = CASE
-            WHEN NEW.confirmed_at IS NOT NULL THEN 'accepted'
-            ELSE 'pending'
-          END
-        WHERE invitation_email = NEW.email
-          AND user_id IS NULL;
-      END IF;
-  
-      IF (TG_OP = 'UPDATE' AND OLD.confirmed_at IS NULL AND NEW.confirmed_at IS NOT NULL) THEN
-        UPDATE public.project_members
-        SET status = 'accepted'
-        WHERE invitation_email = NEW.email
-          AND user_id = NEW.id
-          AND status = 'pending';
-      END IF;
+  IF (TG_OP = 'INSERT') THEN
+    UPDATE public.project_members
+    SET
+      user_id = NEW.id,
+      status = CASE
+        WHEN NEW.confirmed_at IS NOT NULL THEN 'accepted'
+        ELSE 'pending'
+      END
+    WHERE invitation_email = NEW.email
+      AND user_id IS NULL;
+  END IF;
 
-      RETURN NEW;
-    END;$$;
+  IF (TG_OP = 'UPDATE' AND OLD.confirmed_at IS NULL AND NEW.confirmed_at IS NOT NULL) THEN
+    UPDATE public.project_members
+    SET status = 'accepted'
+    WHERE invitation_email = NEW.email
+      AND user_id = NEW.id
+      AND status = 'pending';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
 
 
 ALTER FUNCTION "public"."handle_new_user"() OWNER TO "postgres";
@@ -993,6 +1016,46 @@ CREATE TABLE IF NOT EXISTS "public"."profiles" (
 ALTER TABLE "public"."profiles" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."project_contractors" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "project_id" "uuid" NOT NULL,
+    "name" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "project_contractors_name_check" CHECK (("btrim"("name") <> ''::"text"))
+);
+
+
+ALTER TABLE "public"."project_contractors" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."project_lots" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "project_id" "uuid" NOT NULL,
+    "number" integer NOT NULL,
+    "label" "text",
+    "contractor_id" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "project_lots_number_check" CHECK (("number" > 0))
+);
+
+
+ALTER TABLE "public"."project_lots" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."project_lots"."number" IS 'The N of "Lot N". Assigned by the client as max(number)+1 per project; gaps left by a deletion are kept.';
+
+
+
+COMMENT ON COLUMN "public"."project_lots"."label" IS 'Free title of the lot (e.g. "Gros oeuvre"), shown after the number when filled in.';
+
+
+
+COMMENT ON COLUMN "public"."project_lots"."contractor_id" IS 'The contractor in charge of the lot, if any. A lot has at most one contractor.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."project_members" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "project_id" "uuid" NOT NULL,
@@ -1000,7 +1063,9 @@ CREATE TABLE IF NOT EXISTS "public"."project_members" (
     "invitation_email" "text" NOT NULL,
     "status" "text" DEFAULT 'pending'::"text",
     "role" "text",
-    "project_role" "public"."project_role_enum" DEFAULT 'project_user'::"public"."project_role_enum"
+    "project_role" "public"."project_role_enum" DEFAULT 'project_user'::"public"."project_role_enum",
+    "invitation_token_hash" "text",
+    "invitation_expires_at" timestamp with time zone
 );
 
 
@@ -1189,6 +1254,7 @@ CREATE TABLE IF NOT EXISTS "public"."v2_record_snags" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "target_type" "text" DEFAULT 'building_snag'::"text" NOT NULL,
+    "lot_id" "uuid",
     CONSTRAINT "v2_record_snags_status_check" CHECK (("status" = ANY (ARRAY['raised'::"text", 'declared_lifted'::"text", 'lifted'::"text", 'rejected'::"text"]))),
     CONSTRAINT "v2_record_snags_target_type_check" CHECK (("target_type" = 'building_snag'::"text"))
 );
@@ -1205,7 +1271,11 @@ COMMENT ON COLUMN "public"."v2_record_snags"."status" IS 'raised: newly raised, 
 
 
 
-COMMENT ON COLUMN "public"."v2_record_snags"."contractor" IS 'Free-text responsible contractor/lot, backfilled from details->>''lot_entreprise'' (record_field_config key ''lot_entreprise''). Not a foreign key: no contractors/lots table exists yet.';
+COMMENT ON COLUMN "public"."v2_record_snags"."contractor" IS 'Free-text responsible contractor, kept for projects without lots (project_lots) and for snags without a lot. Backfilled from details->>''lot_entreprise''. When lot_id is set, the lot''s contractor takes precedence.';
+
+
+
+COMMENT ON COLUMN "public"."v2_record_snags"."lot_id" IS 'The lot of the snag; its contractor is the lot''s current one. When set, the free-text contractor column is no longer written.';
 
 
 
@@ -1334,6 +1404,31 @@ ALTER TABLE ONLY "public"."phases"
 
 ALTER TABLE ONLY "public"."profiles"
     ADD CONSTRAINT "profiles_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."project_contractors"
+    ADD CONSTRAINT "project_contractors_id_project_id_key" UNIQUE ("id", "project_id");
+
+
+
+ALTER TABLE ONLY "public"."project_contractors"
+    ADD CONSTRAINT "project_contractors_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."project_contractors"
+    ADD CONSTRAINT "project_contractors_project_id_name_key" UNIQUE ("project_id", "name");
+
+
+
+ALTER TABLE ONLY "public"."project_lots"
+    ADD CONSTRAINT "project_lots_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."project_lots"
+    ADD CONSTRAINT "project_lots_project_id_number_key" UNIQUE ("project_id", "number");
 
 
 
@@ -1468,7 +1563,19 @@ CREATE INDEX "idx_v2_records_project_id" ON "public"."v2_records" USING "btree" 
 
 
 
+CREATE INDEX "project_lots_contractor_id_idx" ON "public"."project_lots" USING "btree" ("contractor_id");
+
+
+
+CREATE UNIQUE INDEX "project_members_invitation_token_hash_key" ON "public"."project_members" USING "btree" ("invitation_token_hash") WHERE ("invitation_token_hash" IS NOT NULL);
+
+
+
 CREATE INDEX "project_phases_project_id_idx" ON "public"."project_phases" USING "btree" ("project_id");
+
+
+
+CREATE INDEX "v2_record_snags_lot_id_idx" ON "public"."v2_record_snags" USING "btree" ("lot_id");
 
 
 
@@ -1528,6 +1635,10 @@ CREATE OR REPLACE TRIGGER "trigger_set_record_scope_number" BEFORE INSERT ON "pu
 
 
 
+CREATE OR REPLACE TRIGGER "v2_record_snags_check_lot_project" BEFORE INSERT OR UPDATE OF "lot_id" ON "public"."v2_record_snags" FOR EACH ROW EXECUTE FUNCTION "public"."check_snag_lot_project"();
+
+
+
 ALTER TABLE ONLY "public"."building_plans"
     ADD CONSTRAINT "building_plans_building_id_fkey" FOREIGN KEY ("building_id") REFERENCES "public"."buildings"("id") ON DELETE CASCADE;
 
@@ -1565,6 +1676,21 @@ ALTER TABLE ONLY "public"."doc_to_review"
 
 ALTER TABLE ONLY "public"."profiles"
     ADD CONSTRAINT "profiles_id_fkey" FOREIGN KEY ("id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."project_contractors"
+    ADD CONSTRAINT "project_contractors_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."project_lots"
+    ADD CONSTRAINT "project_lots_contractor_fk" FOREIGN KEY ("contractor_id", "project_id") REFERENCES "public"."project_contractors"("id", "project_id") ON DELETE SET NULL ("contractor_id");
+
+
+
+ALTER TABLE ONLY "public"."project_lots"
+    ADD CONSTRAINT "project_lots_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
 
 
 
@@ -1635,6 +1761,11 @@ ALTER TABLE ONLY "public"."v2_project_themes"
 
 ALTER TABLE ONLY "public"."v2_record_scope_counters"
     ADD CONSTRAINT "v2_record_scope_counters_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."v2_record_snags"
+    ADD CONSTRAINT "v2_record_snags_lot_id_fkey" FOREIGN KEY ("lot_id") REFERENCES "public"."project_lots"("id");
 
 
 
@@ -1915,6 +2046,22 @@ CREATE POLICY "Profiles - update by itself or kutx_super_admin" ON "public"."pro
 
 
 
+CREATE POLICY "Project contractors - Read by project members or kutx_super_adm" ON "public"."project_contractors" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_contractors"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Project contractors - Write by project_admin or kutx_super_admi" ON "public"."project_contractors" TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_contractors"."project_id") AS "get_my_project_role") = 'project_admin'::"text"))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_contractors"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
+CREATE POLICY "Project lots - Read by project members or kutx_super_admin" ON "public"."project_lots" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_lots"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Project lots - Write by project_admin or kutx_super_admin" ON "public"."project_lots" TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_lots"."project_id") AS "get_my_project_role") = 'project_admin'::"text"))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_lots"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
 CREATE POLICY "Projects - Create for kutx_creator or kutx_super_admin" ON "public"."projects" FOR INSERT TO "authenticated" WITH CHECK ((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = ANY (ARRAY['kutx_creator'::"text", 'kutx_super_admin'::"text"])));
 
 
@@ -2033,6 +2180,12 @@ ALTER TABLE "public"."phases" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."profiles" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."project_contractors" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."project_lots" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."project_members" ENABLE ROW LEVEL SECURITY;
@@ -2294,9 +2447,15 @@ GRANT USAGE ON SCHEMA "public" TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone) TO "anon";
-GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone) TO "authenticated";
-GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone) TO "service_role";
+GRANT ALL ON FUNCTION "public"."check_snag_lot_project"() TO "anon";
+GRANT ALL ON FUNCTION "public"."check_snag_lot_project"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."check_snag_lot_project"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") TO "service_role";
 
 
 
@@ -2467,9 +2626,39 @@ GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public".
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."profiles" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."profiles" TO "authenticated";
+GRANT SELECT,REFERENCES,DELETE,TRIGGER,TRUNCATE ON TABLE "public"."profiles" TO "anon";
+GRANT SELECT,REFERENCES,DELETE,TRIGGER,TRUNCATE ON TABLE "public"."profiles" TO "authenticated";
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."profiles" TO "service_role";
+
+
+
+GRANT UPDATE("enterprise") ON TABLE "public"."profiles" TO "authenticated";
+
+
+
+GRANT UPDATE("first_name") ON TABLE "public"."profiles" TO "authenticated";
+
+
+
+GRANT UPDATE("job_role") ON TABLE "public"."profiles" TO "authenticated";
+
+
+
+GRANT UPDATE("last_name") ON TABLE "public"."profiles" TO "authenticated";
+
+
+
+GRANT UPDATE("preferences") ON TABLE "public"."profiles" TO "authenticated";
+
+
+
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_contractors" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_contractors" TO "service_role";
+
+
+
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_lots" TO "authenticated";
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_lots" TO "service_role";
 
 
 
