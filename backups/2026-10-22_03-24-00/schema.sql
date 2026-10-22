@@ -188,8 +188,8 @@ CREATE OR REPLACE FUNCTION "public"."get_my_project_role"("p_id" "uuid") RETURNS
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $$
-  SELECT project_role FROM public.project_members 
-  WHERE project_id = p_id AND user_id = auth.uid();
+  SELECT project_role FROM public.project_members
+  WHERE project_id = p_id AND user_id = auth.uid() AND status = 'accepted';
 $$;
 
 
@@ -226,65 +226,54 @@ ALTER FUNCTION "public"."handle_new_project"() OWNER TO "postgres";
 
 CREATE OR REPLACE FUNCTION "public"."handle_new_user"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    AS $$BEGIN                                                                       
-      -- Idempotent profile write (UPSERT)                                      
-      INSERT INTO public.profiles (id, email, first_name, last_name, enterprise,
-  job_role,kutx_role)                                                                     
-      VALUES (                                                                  
-        NEW.id,                                                                 
-        NEW.email,                                                              
-        NEW.raw_user_meta_data->>'first_name',                                  
-        NEW.raw_user_meta_data->>'last_name',                                   
-        NEW.raw_user_meta_data->>'enterprise',                                  
-        NEW.raw_user_meta_data->>'job_role',
-        COALESCE(new.raw_app_meta_data->>'roleUser', 'kutx_user')                                     
-      )                                                                         
-      ON CONFLICT (id)                                                          
-      DO UPDATE SET                                                             
-        email = COALESCE(EXCLUDED.email, profiles.email),                       
-        first_name = COALESCE(EXCLUDED.first_name, profiles.first_name),        
-        last_name = COALESCE(EXCLUDED.last_name, profiles.last_name),           
-        enterprise = COALESCE(EXCLUDED.enterprise, profiles.enterprise),        
-        job_role = COALESCE(EXCLUDED.job_role, profiles.job_role),
-        kutx_role = EXCLUDED.kutx_role;
+    AS $$
+BEGIN
+  -- Idempotent profile write (UPSERT). kutx_role is only set when the row is created: afterwards
+  -- profiles.kutx_role is the source of truth and auth metadata never overwrites it.
+  INSERT INTO public.profiles (id, email, first_name, last_name, enterprise, job_role, kutx_role)
+  VALUES (
+    NEW.id,
+    NEW.email,
+    NEW.raw_user_meta_data->>'first_name',
+    NEW.raw_user_meta_data->>'last_name',
+    NEW.raw_user_meta_data->>'enterprise',
+    NEW.raw_user_meta_data->>'job_role',
+    COALESCE(NEW.raw_app_meta_data->>'roleUser', 'kutx_user')
+  )
+  ON CONFLICT (id)
+  DO UPDATE SET
+    email = COALESCE(EXCLUDED.email, profiles.email),
+    first_name = COALESCE(EXCLUDED.first_name, profiles.first_name),
+    last_name = COALESCE(EXCLUDED.last_name, profiles.last_name),
+    enterprise = COALESCE(EXCLUDED.enterprise, profiles.enterprise),
+    job_role = COALESCE(EXCLUDED.job_role, profiles.job_role);
 
-      IF (TG_OP = 'INSERT') THEN
-        UPDATE public.project_members
-        SET
-          user_id = NEW.id,
-          status = CASE
-            WHEN NEW.confirmed_at IS NOT NULL THEN 'accepted'
-            ELSE 'pending'
-          END
-        WHERE invitation_email = NEW.email
-          AND user_id IS NULL;
-      END IF;
-  
-      IF (TG_OP = 'UPDATE' AND OLD.confirmed_at IS NULL AND NEW.confirmed_at IS NOT NULL) THEN
-        UPDATE public.project_members
-        SET status = 'accepted'
-        WHERE invitation_email = NEW.email
-          AND user_id = NEW.id
-          AND status = 'pending';
-      END IF;
+  IF (TG_OP = 'INSERT') THEN
+    UPDATE public.project_members
+    SET
+      user_id = NEW.id,
+      status = CASE
+        WHEN NEW.confirmed_at IS NOT NULL THEN 'accepted'
+        ELSE 'pending'
+      END
+    WHERE invitation_email = NEW.email
+      AND user_id IS NULL;
+  END IF;
 
-      RETURN NEW;
-    END;$$;
+  IF (TG_OP = 'UPDATE' AND OLD.confirmed_at IS NULL AND NEW.confirmed_at IS NOT NULL) THEN
+    UPDATE public.project_members
+    SET status = 'accepted'
+    WHERE invitation_email = NEW.email
+      AND user_id = NEW.id
+      AND status = 'pending';
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
 
 
 ALTER FUNCTION "public"."handle_new_user"() OWNER TO "postgres";
-
-
-CREATE OR REPLACE FUNCTION "public"."is_email_taken"("p_email" "text") RETURNS boolean
-    LANGUAGE "plpgsql" SECURITY DEFINER
-    AS $$                                                                              
-    BEGIN                                                                              
-      RETURN EXISTS (SELECT 1 FROM auth.users WHERE email = p_email);                  
-    END;                                                                               
-    $$;
-
-
-ALTER FUNCTION "public"."is_email_taken"("p_email" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."next_record_scope_number"("p_project_id" "uuid", "p_scope_key" "text") RETURNS integer
@@ -1062,7 +1051,9 @@ CREATE TABLE IF NOT EXISTS "public"."project_members" (
     "invitation_email" "text" NOT NULL,
     "status" "text" DEFAULT 'pending'::"text",
     "role" "text",
-    "project_role" "public"."project_role_enum" DEFAULT 'project_user'::"public"."project_role_enum"
+    "project_role" "public"."project_role_enum" DEFAULT 'project_user'::"public"."project_role_enum",
+    "invitation_token_hash" "text",
+    "invitation_expires_at" timestamp with time zone
 );
 
 
@@ -1564,6 +1555,10 @@ CREATE INDEX "project_lots_contractor_id_idx" ON "public"."project_lots" USING "
 
 
 
+CREATE UNIQUE INDEX "project_members_invitation_token_hash_key" ON "public"."project_members" USING "btree" ("invitation_token_hash") WHERE ("invitation_token_hash" IS NOT NULL);
+
+
+
 CREATE INDEX "project_phases_project_id_idx" ON "public"."project_phases" USING "btree" ("project_id");
 
 
@@ -1869,15 +1864,7 @@ CREATE POLICY "Enable delete for users based on user_id" ON "public"."v2_comment
 
 
 
-CREATE POLICY "Enable delete for users based on user_id" ON "public"."v2_records" FOR DELETE TO "authenticated" USING ((( SELECT "auth"."uid"() AS "uid") = "author_id"));
-
-
-
 CREATE POLICY "Enable delete for users based on user_id" ON "public"."zones_plan" FOR DELETE TO "authenticated" USING ((( SELECT "auth"."uid"() AS "uid") = "created_by"));
-
-
-
-CREATE POLICY "Enable full read access to all authenticated users" ON "public"."project_members" FOR SELECT TO "authenticated" USING (true);
 
 
 
@@ -1894,10 +1881,6 @@ CREATE POLICY "Enable insert for authenticated users only" ON "public"."building
 
 
 CREATE POLICY "Enable insert for authenticated users only" ON "public"."doc_to_review" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."project_members" FOR INSERT TO "authenticated" WITH CHECK (true);
 
 
 
@@ -1981,10 +1964,6 @@ CREATE POLICY "Enable update access for all users" ON "public"."v2_record_users"
 
 
 
-CREATE POLICY "Enable update for authenticated users only" ON "public"."project_members" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
 CREATE POLICY "Enable update for authenticated users only" ON "public"."v2_themes" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
 
 
@@ -2005,7 +1984,7 @@ CREATE POLICY "Members - Read members of my project" ON "public"."project_member
 
 
 
-CREATE POLICY "Members - management by project_admin or kutx_super_admin" ON "public"."project_members" TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_members"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+CREATE POLICY "Members - management by project_admin or kutx_super_admin" ON "public"."project_members" TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_members"."project_id") AS "get_my_project_role") = 'project_admin'::"text"))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_members"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
 
 
 
@@ -2068,6 +2047,10 @@ CREATE POLICY "Projects - Update/Delete by project_admin or kutx_super_admin" ON
 
 
 CREATE POLICY "Records - Create by project members or kutx_super_admin" ON "public"."v2_records" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_records"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Records - Delete by author, project_admin or kutx_super_admin" ON "public"."v2_records" FOR DELETE TO "authenticated" USING (((( SELECT "auth"."uid"() AS "uid") = "author_id") OR (( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_records"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
 
 
 
@@ -2162,10 +2145,6 @@ ALTER TABLE "public"."doc_to_review_state" ENABLE ROW LEVEL SECURITY;
 
 
 CREATE POLICY "enable delete" ON "public"."doc_to_review_state" FOR DELETE TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "eneable delete" ON "public"."project_members" FOR DELETE TO "authenticated" USING (true);
 
 
 
@@ -2482,12 +2461,6 @@ GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "service_role";
 
 
 
-GRANT ALL ON FUNCTION "public"."is_email_taken"("p_email" "text") TO "anon";
-GRANT ALL ON FUNCTION "public"."is_email_taken"("p_email" "text") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."is_email_taken"("p_email" "text") TO "service_role";
-
-
-
 GRANT ALL ON FUNCTION "public"."next_record_scope_number"("p_project_id" "uuid", "p_scope_key" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."next_record_scope_number"("p_project_id" "uuid", "p_scope_key" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."next_record_scope_number"("p_project_id" "uuid", "p_scope_key" "text") TO "service_role";
@@ -2619,9 +2592,29 @@ GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public".
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."profiles" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."profiles" TO "authenticated";
+GRANT SELECT,REFERENCES,DELETE,TRIGGER,TRUNCATE ON TABLE "public"."profiles" TO "anon";
+GRANT SELECT,REFERENCES,DELETE,TRIGGER,TRUNCATE ON TABLE "public"."profiles" TO "authenticated";
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."profiles" TO "service_role";
+
+
+
+GRANT UPDATE("enterprise") ON TABLE "public"."profiles" TO "authenticated";
+
+
+
+GRANT UPDATE("first_name") ON TABLE "public"."profiles" TO "authenticated";
+
+
+
+GRANT UPDATE("job_role") ON TABLE "public"."profiles" TO "authenticated";
+
+
+
+GRANT UPDATE("last_name") ON TABLE "public"."profiles" TO "authenticated";
+
+
+
+GRANT UPDATE("preferences") ON TABLE "public"."profiles" TO "authenticated";
 
 
 
@@ -2635,9 +2628,13 @@ GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public".
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_members" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_members" TO "authenticated";
+GRANT SELECT,REFERENCES,DELETE,TRIGGER,TRUNCATE ON TABLE "public"."project_members" TO "anon";
+GRANT SELECT,REFERENCES,DELETE,TRIGGER,TRUNCATE ON TABLE "public"."project_members" TO "authenticated";
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_members" TO "service_role";
+
+
+
+GRANT UPDATE("project_role") ON TABLE "public"."project_members" TO "authenticated";
 
 
 
