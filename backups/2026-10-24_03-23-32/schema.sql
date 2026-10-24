@@ -157,6 +157,176 @@ $$;
 ALTER FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."document_has_foreign_contribution"("p_document_id" "uuid") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  with doc as (
+    select id, uploaded_by from public.doc_to_review where id = p_document_id
+  )
+  select exists (
+      select 1 from public.v2_records r, doc
+      where r.document_id = doc.id and r.author_id is distinct from doc.uploaded_by
+    )
+    or exists (
+      select 1 from public.v2_photos ph join public.v2_records r on r.id = ph.record_id, doc
+      where r.document_id = doc.id and ph.created_by is distinct from doc.uploaded_by
+    )
+    or exists (
+      select 1 from public.v2_comments c join public.v2_records r on r.id = c.record_id, doc
+      where r.document_id = doc.id and c.author_id is distinct from doc.uploaded_by
+    )
+    or exists (
+      select 1 from public.doc_to_review_state s, doc
+      where s.doc_to_review_id = doc.id
+        and s.user_id is distinct from doc.uploaded_by
+        and s.state is distinct from 'to_review'
+    );
+$$;
+
+
+ALTER FUNCTION "public"."document_has_foreign_contribution"("p_document_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."enforce_owner_column"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+declare
+  v_column text := tg_argv[0];
+begin
+  if tg_op = 'INSERT' then
+    if auth.uid() is not null then
+      new := jsonb_populate_record(new, jsonb_build_object(v_column, auth.uid()));
+    end if;
+  elsif tg_op = 'UPDATE' then
+    new := jsonb_populate_record(new, jsonb_build_object(v_column, to_jsonb(old) -> v_column));
+  end if;
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."enforce_owner_column"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."enforce_record_references"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  if auth.uid() is null then
+    return new;
+  end if;
+  if tg_op = 'UPDATE'
+    and new.project_id is not distinct from old.project_id
+    and new.building_id is not distinct from old.building_id
+    and new.plan_id is not distinct from old.plan_id
+    and new.document_id is not distinct from old.document_id
+    and new.site_id is not distinct from old.site_id
+  then
+    return new;
+  end if;
+
+  if (new.building_id is not null
+        and (select project_id from public.buildings where id = new.building_id)
+            is distinct from new.project_id)
+    or (new.plan_id is not null
+        and (select b.project_id
+               from public.building_plans p
+               join public.buildings b on b.id = p.building_id
+              where p.id = new.plan_id) is distinct from new.project_id)
+    or (new.document_id is not null
+        and (select project_id from public.doc_to_review where id = new.document_id)
+            is distinct from new.project_id)
+    or (new.site_id is not null
+        and (select project_id from public.sites where id = new.site_id)
+            is distinct from new.project_id)
+  then
+    raise exception 'A record''s building, plan, document and site must belong to its project'
+      using errcode = '23514';
+  end if;
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."enforce_record_references"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."enforce_record_update_rights"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+declare
+  v_ignored text[] := array['updated_at', 'author_id', 'scope_number'];
+  v_old jsonb;
+  v_new jsonb;
+begin
+  if auth.uid() is null
+    or old.author_id = auth.uid()
+    or public.get_my_platform_role() = 'kutx_super_admin'
+    or public.get_my_project_role(old.project_id) = 'project_admin'
+  then
+    return new;
+  end if;
+
+  select jsonb_object_agg(key, case when value = '""'::jsonb then 'null'::jsonb else value end)
+    into v_old
+    from jsonb_each(to_jsonb(old) - v_ignored);
+  select jsonb_object_agg(key, case when value = '""'::jsonb then 'null'::jsonb else value end)
+    into v_new
+    from jsonb_each(to_jsonb(new) - v_ignored);
+
+  if v_new is distinct from v_old then
+    raise exception 'Only the author of this record or a project_admin may change it'
+      using errcode = '42501';
+  end if;
+
+  -- Nothing changed: keep the row as it was, last-modified date included.
+  return old;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."enforce_record_update_rights"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."enforce_structure_parent"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+declare
+  v_destination uuid;
+begin
+  if auth.uid() is null or public.get_my_platform_role() = 'kutx_super_admin' then
+    return new;
+  end if;
+
+  if tg_table_name = 'building_plans' then
+    if new.building_id is not distinct from old.building_id then
+      return new;
+    end if;
+    select project_id into v_destination from public.buildings where id = new.building_id;
+  else
+    if new.project_id is not distinct from old.project_id then
+      return new;
+    end if;
+    v_destination := new.project_id;
+  end if;
+
+  if public.get_my_project_role(v_destination) is distinct from 'project_admin' then
+    raise exception 'Only a project_admin of the destination project may move this %', tg_table_name
+      using errcode = '42501';
+  end if;
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."enforce_structure_parent"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."generate_short_id"("prefix" "text") RETURNS "text"
     LANGUAGE "plpgsql"
     SET "search_path" TO 'public'
@@ -188,8 +358,8 @@ CREATE OR REPLACE FUNCTION "public"."get_my_project_role"("p_id" "uuid") RETURNS
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $$
-  SELECT project_role FROM public.project_members 
-  WHERE project_id = p_id AND user_id = auth.uid();
+  SELECT project_role FROM public.project_members
+  WHERE project_id = p_id AND user_id = auth.uid() AND status = 'accepted';
 $$;
 
 
@@ -276,18 +446,6 @@ $$;
 ALTER FUNCTION "public"."handle_new_user"() OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."is_email_taken"("p_email" "text") RETURNS boolean
-    LANGUAGE "plpgsql" SECURITY DEFINER
-    AS $$                                                                              
-    BEGIN                                                                              
-      RETURN EXISTS (SELECT 1 FROM auth.users WHERE email = p_email);                  
-    END;                                                                               
-    $$;
-
-
-ALTER FUNCTION "public"."is_email_taken"("p_email" "text") OWNER TO "postgres";
-
-
 CREATE OR REPLACE FUNCTION "public"."next_record_scope_number"("p_project_id" "uuid", "p_scope_key" "text") RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public'
@@ -345,6 +503,28 @@ $$;
 ALTER FUNCTION "public"."preserve_record_scope_number"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."record_has_foreign_contribution"("p_record_id" "uuid") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  select exists (
+      select 1
+      from public.v2_photos ph
+      join public.v2_records r on r.id = ph.record_id
+      where ph.record_id = p_record_id and ph.created_by is distinct from r.author_id
+    )
+    or exists (
+      select 1
+      from public.v2_comments c
+      join public.v2_records r on r.id = c.record_id
+      where c.record_id = p_record_id and c.author_id is distinct from r.author_id
+    );
+$$;
+
+
+ALTER FUNCTION "public"."record_has_foreign_contribution"("p_record_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") RETURNS "text"
     LANGUAGE "sql" IMMUTABLE
     SET "search_path" TO 'public'
@@ -358,6 +538,27 @@ $$;
 
 
 ALTER FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."reset_document_review_state"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  update public.doc_to_review
+  set review_state = 'to_review'
+  where id in (
+      case when tg_op in ('INSERT', 'UPDATE') then new.document_id end,
+      case when tg_op in ('UPDATE', 'DELETE') then old.document_id end
+    )
+    and review_state is distinct from 'to_review'
+    and read_only = false;
+  return null;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."reset_document_review_state"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."rls_auto_enable"() RETURNS "event_trigger"
@@ -390,21 +591,6 @@ $$;
 
 
 ALTER FUNCTION "public"."rls_auto_enable"() OWNER TO "postgres";
-
-
-CREATE OR REPLACE FUNCTION "public"."set_created_by"() RETURNS "trigger"
-    LANGUAGE "plpgsql"
-    AS $$
-begin
-  if new.created_by is null then
-    new.created_by := auth.uid();
-  end if;
-  return new;
-end;
-$$;
-
-
-ALTER FUNCTION "public"."set_created_by"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."set_record_scope_number"() RETURNS "trigger"
@@ -440,6 +626,20 @@ $$;
 
 
 ALTER FUNCTION "public"."set_updated_by"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."storage_object_project_id"("p_name" "text") RETURNS "uuid"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $_$
+  select case
+    when (storage.foldername(p_name))[2] ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      then ((storage.foldername(p_name))[2])::uuid
+  end;
+$_$;
+
+
+ALTER FUNCTION "public"."storage_object_project_id"("p_name" "text") OWNER TO "postgres";
 
 SET default_tablespace = '';
 
@@ -1340,7 +1540,7 @@ CREATE TABLE IF NOT EXISTS "public"."zones_plan" (
     "points" "jsonb" NOT NULL,
     "plan_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "created_by" "uuid" DEFAULT "gen_random_uuid"(),
+    "created_by" "uuid",
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL
 );
 
@@ -1587,27 +1787,71 @@ CREATE INDEX "v2_releves_projet_id_idx" ON "public"."v2_records" USING "btree" (
 
 
 
+CREATE OR REPLACE TRIGGER "enforce_owner_building_plans" BEFORE INSERT OR UPDATE ON "public"."building_plans" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_owner_column"('created_by');
+
+
+
+CREATE OR REPLACE TRIGGER "enforce_owner_buildings" BEFORE INSERT OR UPDATE ON "public"."buildings" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_owner_column"('created_by');
+
+
+
+CREATE OR REPLACE TRIGGER "enforce_owner_doc_to_review" BEFORE INSERT OR UPDATE ON "public"."doc_to_review" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_owner_column"('uploaded_by');
+
+
+
+CREATE OR REPLACE TRIGGER "enforce_owner_projects" BEFORE INSERT OR UPDATE ON "public"."projects" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_owner_column"('created_by');
+
+
+
+CREATE OR REPLACE TRIGGER "enforce_owner_sites" BEFORE INSERT OR UPDATE ON "public"."sites" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_owner_column"('created_by');
+
+
+
+CREATE OR REPLACE TRIGGER "enforce_owner_v2_comments" BEFORE INSERT OR UPDATE ON "public"."v2_comments" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_owner_column"('author_id');
+
+
+
+CREATE OR REPLACE TRIGGER "enforce_owner_v2_photos" BEFORE INSERT OR UPDATE ON "public"."v2_photos" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_owner_column"('created_by');
+
+
+
+CREATE OR REPLACE TRIGGER "enforce_owner_v2_records" BEFORE INSERT OR UPDATE ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_owner_column"('author_id');
+
+
+
+CREATE OR REPLACE TRIGGER "enforce_owner_zones_plan" BEFORE INSERT OR UPDATE ON "public"."zones_plan" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_owner_column"('created_by');
+
+
+
+CREATE OR REPLACE TRIGGER "enforce_record_references" BEFORE INSERT OR UPDATE ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_record_references"();
+
+
+
+CREATE OR REPLACE TRIGGER "enforce_record_update_rights" BEFORE UPDATE ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_record_update_rights"();
+
+
+
+CREATE OR REPLACE TRIGGER "enforce_structure_parent_building_plans" BEFORE UPDATE ON "public"."building_plans" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_structure_parent"();
+
+
+
+CREATE OR REPLACE TRIGGER "enforce_structure_parent_buildings" BEFORE UPDATE ON "public"."buildings" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_structure_parent"();
+
+
+
+CREATE OR REPLACE TRIGGER "enforce_structure_parent_sites" BEFORE UPDATE ON "public"."sites" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_structure_parent"();
+
+
+
 CREATE OR REPLACE TRIGGER "on_project_created" AFTER INSERT ON "public"."projects" FOR EACH ROW EXECUTE FUNCTION "public"."handle_new_project"();
 
 
 
-CREATE OR REPLACE TRIGGER "set_created_by_building_plans" BEFORE INSERT ON "public"."building_plans" FOR EACH ROW EXECUTE FUNCTION "public"."set_created_by"();
+CREATE OR REPLACE TRIGGER "reset_document_review_state_on_insert_or_delete" AFTER INSERT OR DELETE ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."reset_document_review_state"();
 
 
 
-CREATE OR REPLACE TRIGGER "set_created_by_buildings" BEFORE INSERT ON "public"."buildings" FOR EACH ROW EXECUTE FUNCTION "public"."set_created_by"();
-
-
-
-CREATE OR REPLACE TRIGGER "set_created_by_projects" BEFORE INSERT ON "public"."projects" FOR EACH ROW EXECUTE FUNCTION "public"."set_created_by"();
-
-
-
-CREATE OR REPLACE TRIGGER "set_created_by_sites" BEFORE INSERT ON "public"."sites" FOR EACH ROW EXECUTE FUNCTION "public"."set_created_by"();
-
-
-
-CREATE OR REPLACE TRIGGER "set_created_by_v2_photos" BEFORE INSERT ON "public"."v2_photos" FOR EACH ROW EXECUTE FUNCTION "public"."set_created_by"();
+CREATE OR REPLACE TRIGGER "reset_document_review_state_on_update" AFTER UPDATE ON "public"."v2_records" FOR EACH ROW WHEN (("old".* IS DISTINCT FROM "new".*)) EXECUTE FUNCTION "public"."reset_document_review_state"();
 
 
 
@@ -1834,9 +2078,31 @@ ALTER TABLE ONLY "public"."zones_plan"
 
 
 
+CREATE POLICY "Buildings - Create by project_admin or kutx_super_admin" ON "public"."buildings" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("buildings"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
+CREATE POLICY "Buildings - Delete by project_admin or kutx_super_admin" ON "public"."buildings" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("buildings"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
+CREATE POLICY "Buildings - Read by project members or kutx_super_admin" ON "public"."buildings" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("buildings"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Buildings - Update by project_admin, owner or kutx_super_admin" ON "public"."buildings" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("buildings"."project_id") AS "get_my_project_role") = 'project_admin'::"text") OR (("created_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"("buildings"."project_id") AS "get_my_project_role") IS NOT NULL)))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("buildings"."project_id") AS "get_my_project_role") = 'project_admin'::"text") OR (("created_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"("buildings"."project_id") AS "get_my_project_role") IS NOT NULL))));
+
+
+
 CREATE POLICY "Comments - Create by project members or kutx_super_admin" ON "public"."v2_comments" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
            FROM "public"."v2_records"
           WHERE ("v2_records"."id" = "v2_comments"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Comments - Delete by author or kutx_super_admin" ON "public"."v2_comments" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (("author_id" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_comments"."record_id"))) AS "get_my_project_role") IS NOT NULL))));
 
 
 
@@ -1846,157 +2112,31 @@ CREATE POLICY "Comments - Read by project members or kutx_super_admin" ON "publi
 
 
 
-CREATE POLICY "Comments - Update by project members or kutx_super_admin" ON "public"."v2_comments" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+CREATE POLICY "Comments - Update by author or kutx_super_admin" ON "public"."v2_comments" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (("author_id" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
            FROM "public"."v2_records"
-          WHERE ("v2_records"."id" = "v2_comments"."record_id"))) AS "get_my_project_role") IS NOT NULL))) WITH CHECK ((( SELECT "auth"."uid"() AS "uid") = "author_id"));
+          WHERE ("v2_records"."id" = "v2_comments"."record_id"))) AS "get_my_project_role") IS NOT NULL)))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (("author_id" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_comments"."record_id"))) AS "get_my_project_role") IS NOT NULL))));
 
 
 
-CREATE POLICY "Enable del access for all users" ON "public"."doc_to_review" FOR DELETE TO "authenticated" USING (true);
+CREATE POLICY "Documents - Create by project members or kutx_super_admin" ON "public"."doc_to_review" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("doc_to_review"."project_id") AS "get_my_project_role") IS NOT NULL)));
 
 
 
-CREATE POLICY "Enable del access for all users" ON "public"."project_phases" FOR DELETE TO "authenticated" USING (true);
+CREATE POLICY "Documents - Delete by project_admin, uncontributed owner or kut" ON "public"."doc_to_review" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("doc_to_review"."project_id") AS "get_my_project_role") = 'project_admin'::"text") OR (("uploaded_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"("doc_to_review"."project_id") AS "get_my_project_role") IS NOT NULL) AND (NOT "public"."document_has_foreign_contribution"("id")))));
 
 
 
-CREATE POLICY "Enable del access for all users" ON "public"."v2_project_themes" FOR DELETE TO "authenticated" USING (true);
+CREATE POLICY "Documents - Read by project members or kutx_super_admin" ON "public"."doc_to_review" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("doc_to_review"."project_id") AS "get_my_project_role") IS NOT NULL)));
 
 
 
-CREATE POLICY "Enable del access for all users" ON "public"."v2_themes" FOR DELETE TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable delete access for all users" ON "public"."v2_record_users" FOR DELETE TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable delete for users based on user_id" ON "public"."v2_comments" FOR DELETE USING ((( SELECT "auth"."uid"() AS "uid") = "author_id"));
-
-
-
-CREATE POLICY "Enable delete for users based on user_id" ON "public"."v2_records" FOR DELETE TO "authenticated" USING ((( SELECT "auth"."uid"() AS "uid") = "author_id"));
-
-
-
-CREATE POLICY "Enable delete for users based on user_id" ON "public"."zones_plan" FOR DELETE TO "authenticated" USING ((( SELECT "auth"."uid"() AS "uid") = "created_by"));
-
-
-
-CREATE POLICY "Enable full read access to all authenticated users" ON "public"."project_members" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable insert access for all users" ON "public"."doc_to_review_state" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."building_plans" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."buildings" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."doc_to_review" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."project_members" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."project_phases" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_project_themes" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_record_users" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."v2_themes" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable insert for authenticated users only" ON "public"."zones_plan" FOR INSERT TO "authenticated" WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable read access for all users" ON "public"."building_plans" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable read access for all users" ON "public"."buildings" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable read access for all users" ON "public"."doc_to_review" FOR SELECT TO "authenticated" USING (true);
+CREATE POLICY "Documents - Update by owner, project_admin or kutx_super_admin" ON "public"."doc_to_review" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (("read_only" = false) AND ((( SELECT "public"."get_my_project_role"("doc_to_review"."project_id") AS "get_my_project_role") = 'project_admin'::"text") OR (("uploaded_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"("doc_to_review"."project_id") AS "get_my_project_role") IS NOT NULL)))))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("doc_to_review"."project_id") AS "get_my_project_role") = 'project_admin'::"text") OR (("uploaded_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"("doc_to_review"."project_id") AS "get_my_project_role") IS NOT NULL))));
 
 
 
 CREATE POLICY "Enable read access for all users" ON "public"."phases" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable read access for all users" ON "public"."project_phases" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable read access for all users" ON "public"."sites" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable read access for all users" ON "public"."v2_project_themes" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable read access for all users" ON "public"."v2_record_users" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable read access for all users" ON "public"."v2_themes" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable read access for all users" ON "public"."zones_plan" FOR SELECT TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "Enable update access for all users" ON "public"."doc_to_review" FOR UPDATE TO "authenticated" USING (("read_only" = false)) WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable update access for all users" ON "public"."doc_to_review_state" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable update access for all users" ON "public"."project_phases" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable update access for all users" ON "public"."v2_project_themes" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable update access for all users" ON "public"."v2_record_users" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable update for authenticated users only" ON "public"."project_members" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable update for authenticated users only" ON "public"."v2_themes" FOR UPDATE TO "authenticated" USING (true) WITH CHECK (true);
-
-
-
-CREATE POLICY "Enable update for users based on user_id" ON "public"."zones_plan" FOR UPDATE TO "authenticated" USING ((( SELECT "auth"."uid"() AS "uid") = "created_by"));
 
 
 
@@ -2012,7 +2152,49 @@ CREATE POLICY "Members - Read members of my project" ON "public"."project_member
 
 
 
-CREATE POLICY "Members - management by project_admin or kutx_super_admin" ON "public"."project_members" TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_members"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+CREATE POLICY "Members - management by project_admin or kutx_super_admin" ON "public"."project_members" TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_members"."project_id") AS "get_my_project_role") = 'project_admin'::"text"))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_members"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
+CREATE POLICY "Persons concerned - Create by record owner, project_admin or ku" ON "public"."v2_record_users" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_users"."record_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR ((( SELECT "v2_records"."author_id"
+   FROM "public"."v2_records"
+  WHERE ("v2_records"."id" = "v2_record_users"."record_id")) = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_users"."record_id"))) AS "get_my_project_role") IS NOT NULL))));
+
+
+
+CREATE POLICY "Persons concerned - Delete by record owner, project_admin or ku" ON "public"."v2_record_users" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_users"."record_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR ((( SELECT "v2_records"."author_id"
+   FROM "public"."v2_records"
+  WHERE ("v2_records"."id" = "v2_record_users"."record_id")) = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_users"."record_id"))) AS "get_my_project_role") IS NOT NULL))));
+
+
+
+CREATE POLICY "Persons concerned - Read by project members or kutx_super_admin" ON "public"."v2_record_users" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_users"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Persons concerned - Update by record owner, project_admin or ku" ON "public"."v2_record_users" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_users"."record_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR ((( SELECT "v2_records"."author_id"
+   FROM "public"."v2_records"
+  WHERE ("v2_records"."id" = "v2_record_users"."record_id")) = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_users"."record_id"))) AS "get_my_project_role") IS NOT NULL)))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_users"."record_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR ((( SELECT "v2_records"."author_id"
+   FROM "public"."v2_records"
+  WHERE ("v2_records"."id" = "v2_record_users"."record_id")) = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_record_users"."record_id"))) AS "get_my_project_role") IS NOT NULL))));
 
 
 
@@ -2022,9 +2204,11 @@ CREATE POLICY "Photos - Create by project members or kutx_super_admin" ON "publi
 
 
 
-CREATE POLICY "Photos - Delete by project members or kutx_super_admin" ON "public"."v2_photos" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+CREATE POLICY "Photos - Delete by owner, project_admin or kutx_super_admin" ON "public"."v2_photos" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
            FROM "public"."v2_records"
-          WHERE ("v2_records"."id" = "v2_photos"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
+          WHERE ("v2_records"."id" = "v2_photos"."record_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR (("created_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+           FROM "public"."v2_records"
+          WHERE ("v2_records"."id" = "v2_photos"."record_id"))) AS "get_my_project_role") IS NOT NULL))));
 
 
 
@@ -2034,11 +2218,41 @@ CREATE POLICY "Photos - Read by project members or kutx_super_admin" ON "public"
 
 
 
-CREATE POLICY "Photos - Update by project members or kutx_super_admin" ON "public"."v2_photos" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+CREATE POLICY "Photos - Update by owner or kutx_super_admin" ON "public"."v2_photos" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (("created_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
            FROM "public"."v2_records"
-          WHERE ("v2_records"."id" = "v2_photos"."record_id"))) AS "get_my_project_role") IS NOT NULL))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
+          WHERE ("v2_records"."id" = "v2_photos"."record_id"))) AS "get_my_project_role") IS NOT NULL)))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (("created_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "v2_records"."project_id"
            FROM "public"."v2_records"
-          WHERE ("v2_records"."id" = "v2_photos"."record_id"))) AS "get_my_project_role") IS NOT NULL)));
+          WHERE ("v2_records"."id" = "v2_photos"."record_id"))) AS "get_my_project_role") IS NOT NULL))));
+
+
+
+CREATE POLICY "Plans - Create by project_admin or kutx_super_admin" ON "public"."building_plans" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "buildings"."project_id"
+           FROM "public"."buildings"
+          WHERE ("buildings"."id" = "building_plans"."building_id"))) AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
+CREATE POLICY "Plans - Delete by project_admin or kutx_super_admin" ON "public"."building_plans" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "buildings"."project_id"
+           FROM "public"."buildings"
+          WHERE ("buildings"."id" = "building_plans"."building_id"))) AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
+CREATE POLICY "Plans - Read by project members or kutx_super_admin" ON "public"."building_plans" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "buildings"."project_id"
+           FROM "public"."buildings"
+          WHERE ("buildings"."id" = "building_plans"."building_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Plans - Update by project_admin, owner or kutx_super_admin" ON "public"."building_plans" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "buildings"."project_id"
+           FROM "public"."buildings"
+          WHERE ("buildings"."id" = "building_plans"."building_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR (("created_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "buildings"."project_id"
+           FROM "public"."buildings"
+          WHERE ("buildings"."id" = "building_plans"."building_id"))) AS "get_my_project_role") IS NOT NULL)))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "buildings"."project_id"
+           FROM "public"."buildings"
+          WHERE ("buildings"."id" = "building_plans"."building_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR (("created_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "buildings"."project_id"
+           FROM "public"."buildings"
+          WHERE ("buildings"."id" = "building_plans"."building_id"))) AS "get_my_project_role") IS NOT NULL))));
 
 
 
@@ -2062,7 +2276,43 @@ CREATE POLICY "Project lots - Write by project_admin or kutx_super_admin" ON "pu
 
 
 
+CREATE POLICY "Project phases - Create by project_admin or kutx_super_admin" ON "public"."project_phases" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_phases"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
+CREATE POLICY "Project phases - Delete by project_admin or kutx_super_admin" ON "public"."project_phases" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_phases"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
+CREATE POLICY "Project phases - Read by project members or kutx_super_admin" ON "public"."project_phases" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_phases"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Project phases - Update by project_admin or kutx_super_admin" ON "public"."project_phases" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_phases"."project_id") AS "get_my_project_role") = 'project_admin'::"text"))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("project_phases"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
+CREATE POLICY "Project themes - Create by project members or kutx_super_admin" ON "public"."v2_project_themes" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_project_themes"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Project themes - Delete by project members or kutx_super_admin" ON "public"."v2_project_themes" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_project_themes"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Project themes - Read by project members or kutx_super_admin" ON "public"."v2_project_themes" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_project_themes"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Project themes - Update by project members or kutx_super_admin" ON "public"."v2_project_themes" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_project_themes"."project_id") AS "get_my_project_role") IS NOT NULL))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_project_themes"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
 CREATE POLICY "Projects - Create for kutx_creator or kutx_super_admin" ON "public"."projects" FOR INSERT TO "authenticated" WITH CHECK ((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = ANY (ARRAY['kutx_creator'::"text", 'kutx_super_admin'::"text"])));
+
+
+
+CREATE POLICY "Projects - Delete by kutx_super_admin" ON "public"."projects" FOR DELETE TO "authenticated" USING ((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text"));
 
 
 
@@ -2070,11 +2320,15 @@ CREATE POLICY "Projects - Read my projects or kutx_super_admin" ON "public"."pro
 
 
 
-CREATE POLICY "Projects - Update/Delete by project_admin or kutx_super_admin" ON "public"."projects" TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("projects"."id") AS "get_my_project_role") = 'project_admin'::"text")));
+CREATE POLICY "Projects - Update by project_admin or kutx_super_admin" ON "public"."projects" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("projects"."id") AS "get_my_project_role") = 'project_admin'::"text"))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("projects"."id") AS "get_my_project_role") = 'project_admin'::"text")));
 
 
 
 CREATE POLICY "Records - Create by project members or kutx_super_admin" ON "public"."v2_records" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_records"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Records - Delete by project_admin, uncontributed owner or kutx_" ON "public"."v2_records" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_records"."project_id") AS "get_my_project_role") = 'project_admin'::"text") OR (("author_id" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"("v2_records"."project_id") AS "get_my_project_role") IS NOT NULL) AND (NOT "public"."record_has_foreign_contribution"("id")))));
 
 
 
@@ -2083,6 +2337,66 @@ CREATE POLICY "Records - Read by project members or kutx_super_admin" ON "public
 
 
 CREATE POLICY "Records - Update by project members or kutx_super_admin" ON "public"."v2_records" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_records"."project_id") AS "get_my_project_role") IS NOT NULL))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_records"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Review states - Assign by document owner, project_admin or kutx" ON "public"."doc_to_review_state" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
+           FROM "public"."doc_to_review"
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR ((( SELECT "doc_to_review"."uploaded_by"
+   FROM "public"."doc_to_review"
+  WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id")) = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
+           FROM "public"."doc_to_review"
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL))));
+
+
+
+CREATE POLICY "Review states - Read by project members or kutx_super_admin" ON "public"."doc_to_review_state" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
+           FROM "public"."doc_to_review"
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Review states - Remove by document owner, project_admin or kutx" ON "public"."doc_to_review_state" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
+           FROM "public"."doc_to_review"
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR ((( SELECT "doc_to_review"."uploaded_by"
+   FROM "public"."doc_to_review"
+  WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id")) = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
+           FROM "public"."doc_to_review"
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL))));
+
+
+
+CREATE POLICY "Review states - Update by document owner, project_admin, own re" ON "public"."doc_to_review_state" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
+           FROM "public"."doc_to_review"
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR (((( SELECT "doc_to_review"."uploaded_by"
+   FROM "public"."doc_to_review"
+  WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id")) = ( SELECT "auth"."uid"() AS "uid")) OR ("user_id" = ( SELECT "auth"."uid"() AS "uid"))) AND (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
+           FROM "public"."doc_to_review"
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL)))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
+           FROM "public"."doc_to_review"
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR ((( SELECT "doc_to_review"."uploaded_by"
+   FROM "public"."doc_to_review"
+  WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id")) = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
+           FROM "public"."doc_to_review"
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL)) OR (("user_id" = ( SELECT "auth"."uid"() AS "uid")) AND ("state" = 'reviewed'::"text") AND (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
+           FROM "public"."doc_to_review"
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL))));
+
+
+
+CREATE POLICY "Sites - Create by project_admin or kutx_super_admin" ON "public"."sites" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("sites"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
+CREATE POLICY "Sites - Delete by project_admin or kutx_super_admin" ON "public"."sites" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("sites"."project_id") AS "get_my_project_role") = 'project_admin'::"text")));
+
+
+
+CREATE POLICY "Sites - Read by project members or kutx_super_admin" ON "public"."sites" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("sites"."project_id") AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Sites - Update by project_admin, owner or kutx_super_admin" ON "public"."sites" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("sites"."project_id") AS "get_my_project_role") = 'project_admin'::"text") OR (("created_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"("sites"."project_id") AS "get_my_project_role") IS NOT NULL)))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("sites"."project_id") AS "get_my_project_role") = 'project_admin'::"text") OR (("created_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"("sites"."project_id") AS "get_my_project_role") IS NOT NULL))));
 
 
 
@@ -2112,31 +2426,19 @@ CREATE POLICY "Snags - Update by project members or kutx_super_admin" ON "public
 
 
 
-CREATE POLICY "Users can delete buildings" ON "public"."buildings" FOR DELETE TO "authenticated" USING (("created_by" = "auth"."uid"()));
+CREATE POLICY "Themes - Create in a project by its members, in the catalogue b" ON "public"."v2_themes" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (("project_id" IS NOT NULL) AND (( SELECT "public"."get_my_project_role"("v2_themes"."project_id") AS "get_my_project_role") IS NOT NULL))));
 
 
 
-CREATE POLICY "Users can delete plans" ON "public"."building_plans" FOR DELETE TO "authenticated" USING (("created_by" = "auth"."uid"()));
+CREATE POLICY "Themes - Delete in a project by its members, in the catalogue b" ON "public"."v2_themes" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (("project_id" IS NOT NULL) AND (( SELECT "public"."get_my_project_role"("v2_themes"."project_id") AS "get_my_project_role") IS NOT NULL))));
 
 
 
-CREATE POLICY "Users can delete sites" ON "public"."sites" FOR DELETE TO "authenticated" USING (("created_by" = "auth"."uid"()));
+CREATE POLICY "Themes - Read the catalogue, or a project's themes by its membe" ON "public"."v2_themes" FOR SELECT TO "authenticated" USING ((("project_id" IS NULL) OR (( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"("v2_themes"."project_id") AS "get_my_project_role") IS NOT NULL)));
 
 
 
-CREATE POLICY "Users can insert sites" ON "public"."sites" FOR INSERT TO "authenticated" WITH CHECK (("auth"."uid"() IS NOT NULL));
-
-
-
-CREATE POLICY "Users can update buildings" ON "public"."buildings" FOR UPDATE TO "authenticated" USING (("created_by" = "auth"."uid"()));
-
-
-
-CREATE POLICY "Users can update plans" ON "public"."building_plans" FOR UPDATE TO "authenticated" USING (("created_by" = "auth"."uid"()));
-
-
-
-CREATE POLICY "Users can update sites" ON "public"."sites" FOR UPDATE TO "authenticated" USING (("created_by" = "auth"."uid"()));
+CREATE POLICY "Themes - Update in a project by its members, in the catalogue b" ON "public"."v2_themes" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (("project_id" IS NOT NULL) AND (( SELECT "public"."get_my_project_role"("v2_themes"."project_id") AS "get_my_project_role") IS NOT NULL)))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (("project_id" IS NOT NULL) AND (( SELECT "public"."get_my_project_role"("v2_themes"."project_id") AS "get_my_project_role") IS NOT NULL))));
 
 
 
@@ -2156,6 +2458,46 @@ CREATE POLICY "Voir les collaborateurs de mes projets" ON "public"."profiles" FO
 
 
 
+CREATE POLICY "Zones - Create by project members or kutx_super_admin" ON "public"."zones_plan" FOR INSERT TO "authenticated" WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "b"."project_id"
+           FROM ("public"."building_plans" "p"
+             JOIN "public"."buildings" "b" ON (("b"."id" = "p"."building_id")))
+          WHERE ("p"."id" = "zones_plan"."plan_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Zones - Delete by project_admin, owner or kutx_super_admin" ON "public"."zones_plan" FOR DELETE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "b"."project_id"
+           FROM ("public"."building_plans" "p"
+             JOIN "public"."buildings" "b" ON (("b"."id" = "p"."building_id")))
+          WHERE ("p"."id" = "zones_plan"."plan_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR (("created_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "b"."project_id"
+           FROM ("public"."building_plans" "p"
+             JOIN "public"."buildings" "b" ON (("b"."id" = "p"."building_id")))
+          WHERE ("p"."id" = "zones_plan"."plan_id"))) AS "get_my_project_role") IS NOT NULL))));
+
+
+
+CREATE POLICY "Zones - Read by project members or kutx_super_admin" ON "public"."zones_plan" FOR SELECT TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "b"."project_id"
+           FROM ("public"."building_plans" "p"
+             JOIN "public"."buildings" "b" ON (("b"."id" = "p"."building_id")))
+          WHERE ("p"."id" = "zones_plan"."plan_id"))) AS "get_my_project_role") IS NOT NULL)));
+
+
+
+CREATE POLICY "Zones - Update by project_admin, owner or kutx_super_admin" ON "public"."zones_plan" FOR UPDATE TO "authenticated" USING (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "b"."project_id"
+           FROM ("public"."building_plans" "p"
+             JOIN "public"."buildings" "b" ON (("b"."id" = "p"."building_id")))
+          WHERE ("p"."id" = "zones_plan"."plan_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR (("created_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "b"."project_id"
+           FROM ("public"."building_plans" "p"
+             JOIN "public"."buildings" "b" ON (("b"."id" = "p"."building_id")))
+          WHERE ("p"."id" = "zones_plan"."plan_id"))) AS "get_my_project_role") IS NOT NULL)))) WITH CHECK (((( SELECT "public"."get_my_platform_role"() AS "get_my_platform_role") = 'kutx_super_admin'::"text") OR (( SELECT "public"."get_my_project_role"(( SELECT "b"."project_id"
+           FROM ("public"."building_plans" "p"
+             JOIN "public"."buildings" "b" ON (("b"."id" = "p"."building_id")))
+          WHERE ("p"."id" = "zones_plan"."plan_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR (("created_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "b"."project_id"
+           FROM ("public"."building_plans" "p"
+             JOIN "public"."buildings" "b" ON (("b"."id" = "p"."building_id")))
+          WHERE ("p"."id" = "zones_plan"."plan_id"))) AS "get_my_project_role") IS NOT NULL))));
+
+
+
 ALTER TABLE "public"."building_plans" ENABLE ROW LEVEL SECURITY;
 
 
@@ -2166,14 +2508,6 @@ ALTER TABLE "public"."doc_to_review" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."doc_to_review_state" ENABLE ROW LEVEL SECURITY;
-
-
-CREATE POLICY "enable delete" ON "public"."doc_to_review_state" FOR DELETE TO "authenticated" USING (true);
-
-
-
-CREATE POLICY "eneable delete" ON "public"."project_members" FOR DELETE TO "authenticated" USING (true);
-
 
 
 ALTER TABLE "public"."phases" ENABLE ROW LEVEL SECURITY;
@@ -2195,10 +2529,6 @@ ALTER TABLE "public"."project_phases" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."projects" ENABLE ROW LEVEL SECURITY;
-
-
-CREATE POLICY "read" ON "public"."doc_to_review_state" FOR SELECT TO "authenticated" USING (true);
-
 
 
 ALTER TABLE "public"."record_field_config" ENABLE ROW LEVEL SECURITY;
@@ -2459,6 +2789,33 @@ GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_proje
 
 
 
+REVOKE ALL ON FUNCTION "public"."document_has_foreign_contribution"("p_document_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."document_has_foreign_contribution"("p_document_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."document_has_foreign_contribution"("p_document_id" "uuid") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."enforce_owner_column"() TO "anon";
+GRANT ALL ON FUNCTION "public"."enforce_owner_column"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."enforce_owner_column"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."enforce_record_references"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."enforce_record_references"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."enforce_record_update_rights"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."enforce_record_update_rights"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."enforce_structure_parent"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."enforce_structure_parent"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."generate_short_id"("prefix" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."generate_short_id"("prefix" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."generate_short_id"("prefix" "text") TO "service_role";
@@ -2486,12 +2843,6 @@ GRANT ALL ON FUNCTION "public"."handle_new_project"() TO "service_role";
 GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "anon";
 GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "service_role";
-
-
-
-GRANT ALL ON FUNCTION "public"."is_email_taken"("p_email" "text") TO "anon";
-GRANT ALL ON FUNCTION "public"."is_email_taken"("p_email" "text") TO "authenticated";
-GRANT ALL ON FUNCTION "public"."is_email_taken"("p_email" "text") TO "service_role";
 
 
 
@@ -2542,21 +2893,26 @@ GRANT ALL ON FUNCTION "public"."preserve_record_scope_number"() TO "service_role
 
 
 
+REVOKE ALL ON FUNCTION "public"."record_has_foreign_contribution"("p_record_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."record_has_foreign_contribution"("p_record_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."record_has_foreign_contribution"("p_record_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "public"."reset_document_review_state"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."reset_document_review_state"() TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "anon";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "service_role";
-
-
-
-GRANT ALL ON FUNCTION "public"."set_created_by"() TO "anon";
-GRANT ALL ON FUNCTION "public"."set_created_by"() TO "authenticated";
-GRANT ALL ON FUNCTION "public"."set_created_by"() TO "service_role";
 
 
 
@@ -2569,6 +2925,12 @@ GRANT ALL ON FUNCTION "public"."set_record_scope_number"() TO "service_role";
 GRANT ALL ON FUNCTION "public"."set_updated_by"() TO "anon";
 GRANT ALL ON FUNCTION "public"."set_updated_by"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."set_updated_by"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."storage_object_project_id"("p_name" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."storage_object_project_id"("p_name" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."storage_object_project_id"("p_name" "text") TO "service_role";
 
 
 
@@ -2662,9 +3024,13 @@ GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public".
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_members" TO "anon";
-GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_members" TO "authenticated";
+GRANT SELECT,REFERENCES,DELETE,TRIGGER,TRUNCATE ON TABLE "public"."project_members" TO "anon";
+GRANT SELECT,REFERENCES,DELETE,TRIGGER,TRUNCATE ON TABLE "public"."project_members" TO "authenticated";
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."project_members" TO "service_role";
+
+
+
+GRANT UPDATE("project_role") ON TABLE "public"."project_members" TO "authenticated";
 
 
 
