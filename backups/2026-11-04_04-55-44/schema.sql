@@ -109,6 +109,31 @@ $$;
 ALTER FUNCTION "public"."check_snag_lot_project"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."claim_storage_purge"("p_limit" integer DEFAULT 100) RETURNS SETOF "text"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  -- Referenced again, or written again since it was queued: not to be purged.
+  delete from public.storage_purge_queue q
+  where q.path in (select r.name from public.referenced_storage_names() as r(name) where r.name is not null)
+     or exists (
+       select 1 from storage.objects o
+       where o.bucket_id = 'fichiers' and o.name = q.path
+         and greatest(o.created_at, o.updated_at) > q.queued_at
+     );
+
+  return query
+    select q.path from public.storage_purge_queue q
+    order by q.queued_at
+    limit greatest(p_limit, 1);
+end;
+$$;
+
+
+ALTER FUNCTION "public"."claim_storage_purge"("p_limit" integer) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text" DEFAULT NULL::"text", "p_building_id" "uuid" DEFAULT NULL::"uuid", "p_plan_id" "uuid" DEFAULT NULL::"uuid", "p_pos_x" double precision DEFAULT NULL::double precision, "p_pos_y" double precision DEFAULT NULL::double precision, "p_phase_name" "text" DEFAULT NULL::"text", "p_author_id" "uuid" DEFAULT NULL::"uuid", "p_details" "jsonb" DEFAULT NULL::"jsonb", "p_created_at" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_status" "text" DEFAULT NULL::"text", "p_contractor" "text" DEFAULT NULL::"text", "p_due_date" "date" DEFAULT NULL::"date", "p_observed_at" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_lot_id" "uuid" DEFAULT NULL::"uuid") RETURNS TABLE("scope_number" integer)
     LANGUAGE "plpgsql"
     SET "search_path" TO 'public'
@@ -150,6 +175,37 @@ $$;
 ALTER FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."deactivate_account"("p_user_id" "uuid", "p_anonymised_email" "text") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  update public.profiles
+  set email = p_anonymised_email,
+      first_name = null,
+      last_name = null,
+      enterprise = null,
+      job_role = null,
+      preferences = null,
+      kutx_role = 'kutx_user',
+      deactivated_at = coalesce(deactivated_at, now()),
+      updated_at = now()
+  where id = p_user_id;
+  if not found then
+    raise exception 'No profile for account %', p_user_id using errcode = 'P0002';
+  end if;
+
+  delete from public.project_members where user_id = p_user_id;
+
+  delete from public.v2_record_users where user_id = p_user_id;
+  delete from public.doc_to_review_state where user_id = p_user_id and state <> 'reviewed';
+end;
+$$;
+
+
+ALTER FUNCTION "public"."deactivate_account"("p_user_id" "uuid", "p_anonymised_email" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."default_document_read_only"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     SET "search_path" TO 'public'
@@ -162,6 +218,24 @@ $$;
 
 
 ALTER FUNCTION "public"."default_document_read_only"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."default_record_phase_name"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  if new.phase_name is null or btrim(new.phase_name) = '' then
+    select nullif(btrim(p.current_phase_name), '') into new.phase_name
+    from public.projects p
+    where p.id = new.project_id;
+  end if;
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."default_record_phase_name"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."document_has_foreign_contribution"("p_document_id" "uuid") RETURNS boolean
@@ -290,6 +364,36 @@ $$;
 ALTER FUNCTION "public"."enforce_record_update_rights"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."enqueue_unreferenced_storage_objects"("p_min_age" interval DEFAULT '1 day'::interval) RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+declare
+  v_count integer;
+begin
+  insert into public.storage_purge_queue (path, queued_at)
+  select name, now() from public.unreferenced_storage_objects(p_min_age)
+  on conflict (path) do nothing;
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."enqueue_unreferenced_storage_objects"("p_min_age" interval) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."forget_storage_purge"("p_paths" "text"[]) RETURNS "void"
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  delete from public.storage_purge_queue where path = any (p_paths);
+$$;
+
+
+ALTER FUNCTION "public"."forget_storage_purge"("p_paths" "text"[]) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."generate_short_id"("prefix" "text") RETURNS "text"
     LANGUAGE "plpgsql"
     SET "search_path" TO 'public'
@@ -332,27 +436,19 @@ ALTER FUNCTION "public"."get_my_project_role"("p_id" "uuid") OWNER TO "postgres"
 CREATE OR REPLACE FUNCTION "public"."handle_new_project"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public'
-    AS $$                                                                              
-    BEGIN                                                                              
-      INSERT INTO public.project_members (                                             
-        project_id,                                                                    
-        user_id,                                                                       
-        invitation_email,                                                              
-        status,                                                                        
-        project_role,                                                                  
-        role 
-      )                                                                                
-      VALUES (                                                                         
-        NEW.id,                                                                        
-        COALESCE(NEW.created_by, auth.uid()),                                          
-        (SELECT email FROM auth.users WHERE id = COALESCE(NEW.created_by, auth.uid())),
-        'accepted',                                                                    
-        'project_admin',                                                               
-        NULL                                                                           
-      );                                                                               
-      RETURN NEW;                                                                      
-    END;                                                                               
-    $$;
+    AS $$
+begin
+  insert into public.project_members (project_id, user_id, invitation_email, status, project_role)
+  values (
+    new.id,
+    coalesce(new.created_by, auth.uid()),
+    (select email from auth.users where id = coalesce(new.created_by, auth.uid())),
+    'accepted',
+    'project_admin'
+  );
+  return new;
+end;
+$$;
 
 
 ALTER FUNCTION "public"."handle_new_project"() OWNER TO "postgres";
@@ -469,6 +565,31 @@ $$;
 ALTER FUNCTION "public"."next_record_scope_number"("p_project_id" "uuid", "p_scope_key" "text") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."percent_decode"("p_text" "text") RETURNS "text"
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  if p_text is null or strpos(p_text, '%') = 0 then
+    return p_text;
+  end if;
+  begin
+    return convert_from(
+      (select string_agg(
+                case when m[1] is not null then decode(m[1], 'hex') else convert_to(m[2], 'UTF8') end,
+                ''::bytea order by ord)
+       from regexp_matches(p_text, '%([0-9A-Fa-f]{2})|([^%]+|%)', 'g') with ordinality as t(m, ord)),
+      'UTF8');
+  exception when others then
+    return p_text;
+  end;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."percent_decode"("p_text" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."pin_review_state"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     SET "search_path" TO 'public'
@@ -547,6 +668,39 @@ $$;
 ALTER FUNCTION "public"."protect_foreign_contribution_at"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."queue_storage_purge"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+declare
+  v_old text;
+  v_new text;
+begin
+  if tg_argv[0] = 'screenshot' then
+    v_old := old.metadata ->> 'screenshot_url';
+    if tg_op = 'UPDATE' then
+      v_new := new.metadata ->> 'screenshot_url';
+    end if;
+  else
+    v_old := to_jsonb(old) ->> tg_argv[0];
+    if tg_op = 'UPDATE' then
+      v_new := to_jsonb(new) ->> tg_argv[0];
+    end if;
+  end if;
+
+  v_old := public.storage_object_name(v_old);
+  if v_old is not null and (tg_op = 'DELETE' or v_old is distinct from public.storage_object_name(v_new)) then
+    insert into public.storage_purge_queue (path) values (v_old)
+    on conflict (path) do update set queued_at = now();
+  end if;
+  return null;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."queue_storage_purge"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."record_has_foreign_contribution"("p_record_id" "uuid") RETURNS boolean
     LANGUAGE "sql" STABLE SECURITY DEFINER
     SET "search_path" TO 'public'
@@ -592,52 +746,53 @@ $$;
 ALTER FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."referenced_storage_names"() RETURNS SETOF "text"
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  select public.storage_object_name(url) from public.v2_photos
+  union select public.storage_object_name(image_url) from public.building_plans
+  union select public.storage_object_name(doc_link) from public.doc_to_review
+  union select public.storage_object_name(metadata ->> 'screenshot_url') from public.v2_records
+    where metadata ? 'screenshot_url';
+$$;
+
+
+ALTER FUNCTION "public"."referenced_storage_names"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."require_accepted_member"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public'
     AS $$
 declare
   v_project uuid;
-  v_designated text[];
 begin
   if auth.uid() is null then
     return new;
   end if;
 
-  if tg_table_name = 'doc_to_review' then
-    v_project := new.project_id;
-    v_designated := coalesce(new.assigned_users, '{}');
-    if tg_op = 'UPDATE' then
-      v_designated := array(
-        select d from unnest(v_designated) as d
-        where array_position(coalesce(old.assigned_users, '{}'), d) is null
-      );
-    end if;
-  elsif tg_table_name = 'doc_to_review_state' then
+  if tg_table_name = 'doc_to_review_state' then
     select project_id into v_project from public.doc_to_review where id = new.doc_to_review_id;
-    v_designated := array[new.user_id::text];
-  else
+  elsif tg_table_name = 'v2_record_users' then
     if tg_op = 'UPDATE' and new.user_id is not distinct from old.user_id then
       return new;
     end if;
     select project_id into v_project from public.v2_records where id = new.record_id;
-    v_designated := array[new.user_id::text];
+  else
+    raise exception 'require_accepted_member does not handle table %', tg_table_name;
   end if;
 
   if v_project is null then
     return new;
   end if;
 
-  if exists (
+  if not exists (
     select 1
-    from unnest(v_designated) as d
-    where not exists (
-      select 1
-      from public.project_members pm
-      where pm.project_id = v_project
-        and pm.user_id::text = d
-        and pm.status = 'accepted'
-    )
+    from public.project_members pm
+    where pm.project_id = v_project
+      and pm.user_id = new.user_id
+      and pm.status = 'accepted'
   ) then
     raise exception 'Only an accepted member of the project can be designated on its documents and records'
       using errcode = '23514';
@@ -787,6 +942,26 @@ $$;
 ALTER FUNCTION "public"."stamp_foreign_contribution"("p_document_id" "uuid", "p_contributor" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."storage_object_name"("p_ref" "text") RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO 'public'
+    AS $$
+  select case
+    when p_ref is null or btrim(p_ref) = '' then null
+    when p_ref ~* '^https?://' then
+      case when p_ref ~ '/storage/v1/object/(public/|sign/|authenticated/)?fichiers/'
+        then public.percent_decode(split_part(
+          regexp_replace(p_ref, '^.*/storage/v1/object/(public/|sign/|authenticated/)?fichiers/', ''),
+          '?', 1))
+      end
+    else regexp_replace(p_ref, '^/?(fichiers/)?', '')
+  end;
+$$;
+
+
+ALTER FUNCTION "public"."storage_object_name"("p_ref" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."storage_object_project_id"("p_name" "text") RETURNS "uuid"
     LANGUAGE "sql" IMMUTABLE
     SET "search_path" TO ''
@@ -799,6 +974,22 @@ $_$;
 
 
 ALTER FUNCTION "public"."storage_object_project_id"("p_name" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."unreferenced_storage_objects"("p_min_age" interval DEFAULT '1 day'::interval) RETURNS TABLE("name" "text", "created_at" timestamp with time zone, "size" bigint)
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO 'public'
+    AS $$
+  select o.name, o.created_at, nullif(o.metadata ->> 'size', '')::bigint
+  from storage.objects o
+  where o.bucket_id = 'fichiers'
+    and greatest(o.created_at, o.updated_at) < now() - p_min_age
+    and o.name not in (select r.name from public.referenced_storage_names() as r(name) where r.name is not null)
+    and not exists (select 1 from public.storage_purge_queue q where q.path = o.name);
+$$;
+
+
+ALTER FUNCTION "public"."unreferenced_storage_objects"("p_min_age" interval) OWNER TO "postgres";
 
 SET default_tablespace = '';
 
@@ -1225,7 +1416,7 @@ ALTER TABLE "migration_staging"."zones_plan" OWNER TO "postgres";
 
 CREATE TABLE IF NOT EXISTS "public"."building_plans" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "building_id" "uuid",
+    "building_id" "uuid" NOT NULL,
     "name" "text",
     "image_url" "text",
     "created_by" "uuid",
@@ -1269,7 +1460,8 @@ CREATE TABLE IF NOT EXISTS "public"."buildings" (
     "project_id" "uuid",
     "created_at" timestamp with time zone DEFAULT "now"(),
     "created_by" "uuid",
-    "updated_by" "uuid"
+    "updated_by" "uuid",
+    CONSTRAINT "buildings_site_needs_project" CHECK ((("site_id" IS NULL) OR ("project_id" IS NOT NULL)))
 );
 
 
@@ -1324,7 +1516,6 @@ CREATE TABLE IF NOT EXISTS "public"."doc_to_review" (
     "doc_link" "text" NOT NULL,
     "phase_name" "text",
     "project_id" "uuid" NOT NULL,
-    "assigned_users" "text"[],
     "review_state" "text" DEFAULT 'to_review'::"text" NOT NULL,
     "read_only" boolean DEFAULT false NOT NULL,
     "is_external_upload" boolean DEFAULT false,
@@ -1373,11 +1564,16 @@ CREATE TABLE IF NOT EXISTS "public"."profiles" (
     "last_name" "text",
     "kutx_role" "text" DEFAULT 'kutx_user'::"text",
     "preferences" "jsonb" DEFAULT '{}'::"jsonb",
+    "deactivated_at" timestamp with time zone,
     CONSTRAINT "check_valid_kutx_role" CHECK (("kutx_role" = ANY (ARRAY['kutx_user'::"text", 'kutx_creator'::"text", 'kutx_super_admin'::"text"])))
 );
 
 
 ALTER TABLE "public"."profiles" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."profiles"."deactivated_at" IS 'Set by deactivate-account: the account is banned and anonymised; its work stays, shown as "Compte supprimé".';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."project_contractors" (
@@ -1426,14 +1622,18 @@ CREATE TABLE IF NOT EXISTS "public"."project_members" (
     "user_id" "uuid",
     "invitation_email" "text" NOT NULL,
     "status" "text" DEFAULT 'pending'::"text",
-    "role" "text",
     "project_role" "public"."project_role_enum" DEFAULT 'project_user'::"public"."project_role_enum",
     "invitation_token_hash" "text",
-    "invitation_expires_at" timestamp with time zone
+    "invitation_expires_at" timestamp with time zone,
+    "job_title" "text"
 );
 
 
 ALTER TABLE "public"."project_members" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."project_members"."job_title" IS 'The member''s job title on this project ("Architecte", "BET Fluides"…), free text, for display only: it carries no privilege (project_role does).';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."project_phases" (
@@ -1562,6 +1762,19 @@ COMMENT ON COLUMN "public"."sites"."project_id" IS 'Identifiant du projet ratach
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."storage_purge_queue" (
+    "path" "text" NOT NULL,
+    "queued_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."storage_purge_queue" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."storage_purge_queue" IS 'Paths of bucket fichiers left behind by a deleted row; purged by the Edge Function purge-storage.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."v2_comments" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "record_id" "uuid" NOT NULL,
@@ -1670,11 +1883,14 @@ CREATE TABLE IF NOT EXISTS "public"."v2_records" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "document_id" "uuid",
     "metadata" "jsonb" DEFAULT '{}'::"jsonb",
-    "phase_name" "text" DEFAULT ''::"text",
+    "phase_name" "text",
     "details" "jsonb" DEFAULT '{}'::"jsonb",
     "short_id" "text" DEFAULT "public"."generate_short_id"('r'::"text") NOT NULL,
     "scope_number" integer,
     "observed_at" timestamp with time zone DEFAULT "now"(),
+    CONSTRAINT "v2_records_phase_name_not_blank" CHECK (("btrim"("phase_name") <> ''::"text")),
+    CONSTRAINT "v2_records_plan_needs_building" CHECK ((("plan_id" IS NULL) OR ("building_id" IS NOT NULL))),
+    CONSTRAINT "v2_records_project_id_present" CHECK (("project_id" IS NOT NULL)),
     CONSTRAINT "v2_records_scope_number_positive_check" CHECK ((("scope_number" IS NULL) OR ("scope_number" > 0))),
     CONSTRAINT "v2_records_short_id_format_check" CHECK (("short_id" ~ '^r[0-9]{7}$'::"text"))
 );
@@ -1737,7 +1953,17 @@ ALTER TABLE ONLY "migration_staging"."user_id_map"
 
 
 ALTER TABLE ONLY "public"."building_plans"
+    ADD CONSTRAINT "building_plans_id_building_id_key" UNIQUE ("id", "building_id");
+
+
+
+ALTER TABLE ONLY "public"."building_plans"
     ADD CONSTRAINT "building_plans_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."buildings"
+    ADD CONSTRAINT "buildings_id_project_id_key" UNIQUE ("id", "project_id");
 
 
 
@@ -1752,7 +1978,17 @@ ALTER TABLE "public"."v2_project_themes"
 
 
 ALTER TABLE ONLY "public"."doc_to_review"
+    ADD CONSTRAINT "doc_to_review_id_project_id_key" UNIQUE ("id", "project_id");
+
+
+
+ALTER TABLE ONLY "public"."doc_to_review"
     ADD CONSTRAINT "doc_to_review_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."doc_to_review_state"
+    ADD CONSTRAINT "doc_to_review_state_document_user_key" UNIQUE ("doc_to_review_id", "user_id");
 
 
 
@@ -1832,7 +2068,17 @@ ALTER TABLE ONLY "public"."record_field_config"
 
 
 ALTER TABLE ONLY "public"."sites"
+    ADD CONSTRAINT "sites_id_project_id_key" UNIQUE ("id", "project_id");
+
+
+
+ALTER TABLE ONLY "public"."sites"
     ADD CONSTRAINT "sites_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."storage_purge_queue"
+    ADD CONSTRAINT "storage_purge_queue_pkey" PRIMARY KEY ("path");
 
 
 
@@ -1955,6 +2201,10 @@ CREATE OR REPLACE TRIGGER "default_document_read_only" BEFORE INSERT OR UPDATE O
 
 
 
+CREATE OR REPLACE TRIGGER "default_record_phase_name" BEFORE INSERT OR UPDATE OF "phase_name" ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."default_record_phase_name"();
+
+
+
 CREATE OR REPLACE TRIGGER "enforce_owner_building_plans" BEFORE INSERT OR UPDATE ON "public"."building_plans" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_owner_column"('created_by');
 
 
@@ -2027,7 +2277,19 @@ CREATE OR REPLACE TRIGGER "protect_foreign_contribution_at" BEFORE INSERT OR UPD
 
 
 
-CREATE OR REPLACE TRIGGER "require_accepted_member" BEFORE INSERT OR UPDATE OF "assigned_users" ON "public"."doc_to_review" FOR EACH ROW EXECUTE FUNCTION "public"."require_accepted_member"();
+CREATE OR REPLACE TRIGGER "queue_storage_purge" AFTER DELETE OR UPDATE OF "image_url" ON "public"."building_plans" FOR EACH ROW EXECUTE FUNCTION "public"."queue_storage_purge"('image_url');
+
+
+
+CREATE OR REPLACE TRIGGER "queue_storage_purge" AFTER DELETE OR UPDATE OF "doc_link" ON "public"."doc_to_review" FOR EACH ROW EXECUTE FUNCTION "public"."queue_storage_purge"('doc_link');
+
+
+
+CREATE OR REPLACE TRIGGER "queue_storage_purge" AFTER DELETE OR UPDATE OF "url" ON "public"."v2_photos" FOR EACH ROW EXECUTE FUNCTION "public"."queue_storage_purge"('url');
+
+
+
+CREATE OR REPLACE TRIGGER "queue_storage_purge" AFTER DELETE OR UPDATE OF "metadata" ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."queue_storage_purge"('screenshot');
 
 
 
@@ -2102,7 +2364,7 @@ ALTER TABLE ONLY "public"."buildings"
 
 
 ALTER TABLE ONLY "public"."buildings"
-    ADD CONSTRAINT "buildings_site_id_fkey" FOREIGN KEY ("site_id") REFERENCES "public"."sites"("id") ON DELETE CASCADE;
+    ADD CONSTRAINT "buildings_site_in_project_fkey" FOREIGN KEY ("site_id", "project_id") REFERENCES "public"."sites"("id", "project_id") ON DELETE CASCADE DEFERRABLE;
 
 
 
@@ -2122,7 +2384,7 @@ ALTER TABLE ONLY "public"."doc_to_review_state"
 
 
 ALTER TABLE ONLY "public"."doc_to_review"
-    ADD CONSTRAINT "doc_to_review_uploaded_by_fkey" FOREIGN KEY ("uploaded_by") REFERENCES "auth"."users"("id") ON UPDATE CASCADE ON DELETE CASCADE;
+    ADD CONSTRAINT "doc_to_review_uploaded_by_fkey" FOREIGN KEY ("uploaded_by") REFERENCES "auth"."users"("id") ON UPDATE CASCADE ON DELETE RESTRICT;
 
 
 
@@ -2247,17 +2509,17 @@ ALTER TABLE ONLY "public"."v2_records"
 
 
 ALTER TABLE ONLY "public"."v2_records"
-    ADD CONSTRAINT "v2_records_building_id_fkey" FOREIGN KEY ("building_id") REFERENCES "public"."buildings"("id") ON DELETE CASCADE;
+    ADD CONSTRAINT "v2_records_building_in_project_fkey" FOREIGN KEY ("building_id", "project_id") REFERENCES "public"."buildings"("id", "project_id") ON DELETE CASCADE DEFERRABLE;
 
 
 
 ALTER TABLE ONLY "public"."v2_records"
-    ADD CONSTRAINT "v2_records_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."doc_to_review"("id") ON UPDATE CASCADE ON DELETE CASCADE;
+    ADD CONSTRAINT "v2_records_document_in_project_fkey" FOREIGN KEY ("document_id", "project_id") REFERENCES "public"."doc_to_review"("id", "project_id") ON DELETE CASCADE DEFERRABLE;
 
 
 
 ALTER TABLE ONLY "public"."v2_records"
-    ADD CONSTRAINT "v2_records_plan_id_fkey" FOREIGN KEY ("plan_id") REFERENCES "public"."building_plans"("id") ON DELETE CASCADE;
+    ADD CONSTRAINT "v2_records_plan_on_building_fkey" FOREIGN KEY ("plan_id", "building_id") REFERENCES "public"."building_plans"("id", "building_id") ON DELETE CASCADE DEFERRABLE;
 
 
 
@@ -2267,7 +2529,7 @@ ALTER TABLE ONLY "public"."v2_records"
 
 
 ALTER TABLE ONLY "public"."v2_records"
-    ADD CONSTRAINT "v2_records_site_id_fkey" FOREIGN KEY ("site_id") REFERENCES "public"."sites"("id") ON DELETE CASCADE;
+    ADD CONSTRAINT "v2_records_site_in_project_fkey" FOREIGN KEY ("site_id", "project_id") REFERENCES "public"."sites"("id", "project_id") ON DELETE CASCADE DEFERRABLE;
 
 
 
@@ -2277,7 +2539,7 @@ ALTER TABLE ONLY "public"."v2_themes"
 
 
 ALTER TABLE ONLY "public"."zones_plan"
-    ADD CONSTRAINT "zones_plans_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id") ON UPDATE CASCADE ON DELETE CASCADE;
+    ADD CONSTRAINT "zones_plans_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id") ON DELETE RESTRICT;
 
 
 
@@ -2461,6 +2723,10 @@ CREATE POLICY "Plans - Update by project_admin, owner or kutx_super_admin" ON "p
           WHERE ("buildings"."id" = "building_plans"."building_id"))) AS "get_my_project_role") = 'project_admin'::"text") OR (("created_by" = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "buildings"."project_id"
            FROM "public"."buildings"
           WHERE ("buildings"."id" = "building_plans"."building_id"))) AS "get_my_project_role") IS NOT NULL))));
+
+
+
+CREATE POLICY "Profiles - deactivated accounts are read by everyone signed in" ON "public"."profiles" FOR SELECT TO "authenticated" USING (("deactivated_at" IS NOT NULL));
 
 
 
@@ -2745,6 +3011,9 @@ ALTER TABLE "public"."record_field_config" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."sites" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."storage_purge_queue" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."v2_comments" ENABLE ROW LEVEL SECURITY;
 
 
@@ -2990,14 +3259,29 @@ GRANT ALL ON FUNCTION "public"."check_snag_lot_project"() TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "public"."claim_storage_purge"("p_limit" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."claim_storage_purge"("p_limit" integer) TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") TO "service_role";
 GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") TO "authenticated";
 
 
 
+REVOKE ALL ON FUNCTION "public"."deactivate_account"("p_user_id" "uuid", "p_anonymised_email" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."deactivate_account"("p_user_id" "uuid", "p_anonymised_email" "text") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."default_document_read_only"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."default_document_read_only"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."default_record_phase_name"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."default_record_phase_name"() TO "service_role";
 
 
 
@@ -3019,6 +3303,16 @@ GRANT ALL ON FUNCTION "public"."enforce_record_references"() TO "service_role";
 
 REVOKE ALL ON FUNCTION "public"."enforce_record_update_rights"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."enforce_record_update_rights"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."enqueue_unreferenced_storage_objects"("p_min_age" interval) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."enqueue_unreferenced_storage_objects"("p_min_age" interval) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."forget_storage_purge"("p_paths" "text"[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."forget_storage_purge"("p_paths" "text"[]) TO "service_role";
 
 
 
@@ -3060,6 +3354,11 @@ GRANT ALL ON FUNCTION "public"."next_record_scope_number"("p_project_id" "uuid",
 
 
 
+REVOKE ALL ON FUNCTION "public"."percent_decode"("p_text" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."percent_decode"("p_text" "text") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."pin_review_state"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."pin_review_state"() TO "service_role";
 
@@ -3075,6 +3374,11 @@ GRANT ALL ON FUNCTION "public"."protect_foreign_contribution_at"() TO "service_r
 
 
 
+REVOKE ALL ON FUNCTION "public"."queue_storage_purge"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."queue_storage_purge"() TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."record_has_foreign_contribution"("p_record_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."record_has_foreign_contribution"("p_record_id" "uuid") TO "service_role";
 GRANT ALL ON FUNCTION "public"."record_has_foreign_contribution"("p_record_id" "uuid") TO "authenticated";
@@ -3084,6 +3388,11 @@ GRANT ALL ON FUNCTION "public"."record_has_foreign_contribution"("p_record_id" "
 REVOKE ALL ON FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") TO "service_role";
 GRANT ALL ON FUNCTION "public"."record_scope_key"("p_target_type" "text", "p_document_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."referenced_storage_names"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."referenced_storage_names"() TO "service_role";
 
 
 
@@ -3122,9 +3431,19 @@ GRANT ALL ON FUNCTION "public"."stamp_foreign_contribution"("p_document_id" "uui
 
 
 
+REVOKE ALL ON FUNCTION "public"."storage_object_name"("p_ref" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."storage_object_name"("p_ref" "text") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."storage_object_project_id"("p_name" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."storage_object_project_id"("p_name" "text") TO "service_role";
 GRANT ALL ON FUNCTION "public"."storage_object_project_id"("p_name" "text") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."unreferenced_storage_objects"("p_min_age" interval) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."unreferenced_storage_objects"("p_min_age" interval) TO "service_role";
 
 
 
@@ -3235,6 +3554,10 @@ GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public".
 
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE "public"."sites" TO "authenticated";
 GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."sites" TO "service_role";
+
+
+
+GRANT SELECT,INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,UPDATE ON TABLE "public"."storage_purge_queue" TO "service_role";
 
 
 
