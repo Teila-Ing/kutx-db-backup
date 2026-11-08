@@ -141,7 +141,7 @@ CREATE OR REPLACE FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_
 begin
   insert into public.v2_records (
     id, short_id, project_id, target_type, building_id, plan_id, pos_x, pos_y,
-    document_id, metadata, description, theme_name, phase_name, author_id, details,
+    document_id, description, theme_name, phase_name, author_id, details,
     created_at, observed_at
   ) values (
     p_id,
@@ -153,7 +153,6 @@ begin
     p_plan_id,
     p_pos_x,
     p_pos_y,
-    null,
     null,
     p_description,
     p_theme_name,
@@ -199,13 +198,6 @@ begin
 
   delete from public.v2_record_users where user_id = p_user_id;
   delete from public.doc_to_review_state where user_id = p_user_id and state <> 'reviewed';
-  update public.doc_to_review d
-  set assigned_users = array_remove(d.assigned_users, p_user_id::text)
-  where p_user_id::text = any (d.assigned_users)
-    and not exists (
-      select 1 from public.doc_to_review_state s
-      where s.doc_to_review_id = d.id and s.user_id = p_user_id and s.state = 'reviewed'
-    );
 end;
 $$;
 
@@ -225,6 +217,24 @@ $$;
 
 
 ALTER FUNCTION "public"."default_document_read_only"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."default_record_phase_name"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  if new.phase_name is null or btrim(new.phase_name) = '' then
+    select nullif(btrim(p.current_phase_name), '') into new.phase_name
+    from public.projects p
+    where p.id = new.project_id;
+  end if;
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."default_record_phase_name"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."document_has_foreign_contribution"("p_document_id" "uuid") RETURNS boolean
@@ -425,27 +435,19 @@ ALTER FUNCTION "public"."get_my_project_role"("p_id" "uuid") OWNER TO "postgres"
 CREATE OR REPLACE FUNCTION "public"."handle_new_project"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public'
-    AS $$                                                                              
-    BEGIN                                                                              
-      INSERT INTO public.project_members (                                             
-        project_id,                                                                    
-        user_id,                                                                       
-        invitation_email,                                                              
-        status,                                                                        
-        project_role,                                                                  
-        role 
-      )                                                                                
-      VALUES (                                                                         
-        NEW.id,                                                                        
-        COALESCE(NEW.created_by, auth.uid()),                                          
-        (SELECT email FROM auth.users WHERE id = COALESCE(NEW.created_by, auth.uid())),
-        'accepted',                                                                    
-        'project_admin',                                                               
-        NULL                                                                           
-      );                                                                               
-      RETURN NEW;                                                                      
-    END;                                                                               
-    $$;
+    AS $$
+begin
+  insert into public.project_members (project_id, user_id, invitation_email, status, project_role)
+  values (
+    new.id,
+    coalesce(new.created_by, auth.uid()),
+    (select email from auth.users where id = coalesce(new.created_by, auth.uid())),
+    'accepted',
+    'project_admin'
+  );
+  return new;
+end;
+$$;
 
 
 ALTER FUNCTION "public"."handle_new_project"() OWNER TO "postgres";
@@ -764,46 +766,32 @@ CREATE OR REPLACE FUNCTION "public"."require_accepted_member"() RETURNS "trigger
     AS $$
 declare
   v_project uuid;
-  v_designated text[];
 begin
   if auth.uid() is null then
     return new;
   end if;
 
-  if tg_table_name = 'doc_to_review' then
-    v_project := new.project_id;
-    v_designated := coalesce(new.assigned_users, '{}');
-    if tg_op = 'UPDATE' then
-      v_designated := array(
-        select d from unnest(v_designated) as d
-        where array_position(coalesce(old.assigned_users, '{}'), d) is null
-      );
-    end if;
-  elsif tg_table_name = 'doc_to_review_state' then
+  if tg_table_name = 'doc_to_review_state' then
     select project_id into v_project from public.doc_to_review where id = new.doc_to_review_id;
-    v_designated := array[new.user_id::text];
-  else
+  elsif tg_table_name = 'v2_record_users' then
     if tg_op = 'UPDATE' and new.user_id is not distinct from old.user_id then
       return new;
     end if;
     select project_id into v_project from public.v2_records where id = new.record_id;
-    v_designated := array[new.user_id::text];
+  else
+    raise exception 'require_accepted_member does not handle table %', tg_table_name;
   end if;
 
   if v_project is null then
     return new;
   end if;
 
-  if exists (
+  if not exists (
     select 1
-    from unnest(v_designated) as d
-    where not exists (
-      select 1
-      from public.project_members pm
-      where pm.project_id = v_project
-        and pm.user_id::text = d
-        and pm.status = 'accepted'
-    )
+    from public.project_members pm
+    where pm.project_id = v_project
+      and pm.user_id = new.user_id
+      and pm.status = 'accepted'
   ) then
     raise exception 'Only an accepted member of the project can be designated on its documents and records'
       using errcode = '23514';
@@ -1427,7 +1415,7 @@ ALTER TABLE "migration_staging"."zones_plan" OWNER TO "postgres";
 
 CREATE TABLE IF NOT EXISTS "public"."building_plans" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "building_id" "uuid",
+    "building_id" "uuid" NOT NULL,
     "name" "text",
     "image_url" "text",
     "created_by" "uuid",
@@ -1527,7 +1515,6 @@ CREATE TABLE IF NOT EXISTS "public"."doc_to_review" (
     "doc_link" "text" NOT NULL,
     "phase_name" "text",
     "project_id" "uuid" NOT NULL,
-    "assigned_users" "text"[],
     "review_state" "text" DEFAULT 'to_review'::"text" NOT NULL,
     "read_only" boolean DEFAULT false NOT NULL,
     "is_external_upload" boolean DEFAULT false,
@@ -1634,14 +1621,18 @@ CREATE TABLE IF NOT EXISTS "public"."project_members" (
     "user_id" "uuid",
     "invitation_email" "text" NOT NULL,
     "status" "text" DEFAULT 'pending'::"text",
-    "role" "text",
     "project_role" "public"."project_role_enum" DEFAULT 'project_user'::"public"."project_role_enum",
     "invitation_token_hash" "text",
-    "invitation_expires_at" timestamp with time zone
+    "invitation_expires_at" timestamp with time zone,
+    "job_title" "text"
 );
 
 
 ALTER TABLE "public"."project_members" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."project_members"."job_title" IS 'The member''s job title on this project ("Architecte", "BET Fluides"…), free text, for display only: it carries no privilege (project_role does).';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."project_phases" (
@@ -1891,11 +1882,12 @@ CREATE TABLE IF NOT EXISTS "public"."v2_records" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "document_id" "uuid",
     "metadata" "jsonb" DEFAULT '{}'::"jsonb",
-    "phase_name" "text" DEFAULT ''::"text",
+    "phase_name" "text",
     "details" "jsonb" DEFAULT '{}'::"jsonb",
     "short_id" "text" DEFAULT "public"."generate_short_id"('r'::"text") NOT NULL,
     "scope_number" integer,
     "observed_at" timestamp with time zone DEFAULT "now"(),
+    CONSTRAINT "v2_records_phase_name_not_blank" CHECK (("btrim"("phase_name") <> ''::"text")),
     CONSTRAINT "v2_records_plan_needs_building" CHECK ((("plan_id" IS NULL) OR ("building_id" IS NOT NULL))),
     CONSTRAINT "v2_records_project_id_present" CHECK (("project_id" IS NOT NULL)),
     CONSTRAINT "v2_records_scope_number_positive_check" CHECK ((("scope_number" IS NULL) OR ("scope_number" > 0))),
@@ -1991,6 +1983,11 @@ ALTER TABLE ONLY "public"."doc_to_review"
 
 ALTER TABLE ONLY "public"."doc_to_review"
     ADD CONSTRAINT "doc_to_review_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."doc_to_review_state"
+    ADD CONSTRAINT "doc_to_review_state_document_user_key" UNIQUE ("doc_to_review_id", "user_id");
 
 
 
@@ -2203,6 +2200,10 @@ CREATE OR REPLACE TRIGGER "default_document_read_only" BEFORE INSERT OR UPDATE O
 
 
 
+CREATE OR REPLACE TRIGGER "default_record_phase_name" BEFORE INSERT OR UPDATE OF "phase_name" ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."default_record_phase_name"();
+
+
+
 CREATE OR REPLACE TRIGGER "enforce_owner_building_plans" BEFORE INSERT OR UPDATE ON "public"."building_plans" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_owner_column"('created_by');
 
 
@@ -2288,10 +2289,6 @@ CREATE OR REPLACE TRIGGER "queue_storage_purge" AFTER DELETE OR UPDATE OF "url" 
 
 
 CREATE OR REPLACE TRIGGER "queue_storage_purge" AFTER DELETE OR UPDATE OF "metadata" ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."queue_storage_purge"('screenshot');
-
-
-
-CREATE OR REPLACE TRIGGER "require_accepted_member" BEFORE INSERT OR UPDATE OF "assigned_users" ON "public"."doc_to_review" FOR EACH ROW EXECUTE FUNCTION "public"."require_accepted_member"();
 
 
 
@@ -3279,6 +3276,11 @@ GRANT ALL ON FUNCTION "public"."deactivate_account"("p_user_id" "uuid", "p_anony
 
 REVOKE ALL ON FUNCTION "public"."default_document_read_only"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."default_document_read_only"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."default_record_phase_name"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."default_record_phase_name"() TO "service_role";
 
 
 
