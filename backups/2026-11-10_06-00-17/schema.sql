@@ -78,6 +78,47 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";
 
 
 
+CREATE TYPE "public"."membership_status" AS ENUM (
+    'pending',
+    'accepted'
+);
+
+
+ALTER TYPE "public"."membership_status" OWNER TO "postgres";
+
+
+COMMENT ON TYPE "public"."membership_status" IS 'Project membership: invited (pending) or accepted.';
+
+
+
+CREATE TYPE "public"."phase_category" AS ENUM (
+    'prog_diag',
+    'design',
+    'works'
+);
+
+
+ALTER TYPE "public"."phase_category" OWNER TO "postgres";
+
+
+COMMENT ON TYPE "public"."phase_category" IS 'Group of a phase: programming and diagnosis, design, or works.';
+
+
+
+CREATE TYPE "public"."plan_type" AS ENUM (
+    'floor',
+    'facade',
+    'site_plan'
+);
+
+
+ALTER TYPE "public"."plan_type" OWNER TO "postgres";
+
+
+COMMENT ON TYPE "public"."plan_type" IS 'Kind of building plan: floor, facade or site plan.';
+
+
+
 CREATE TYPE "public"."project_role_enum" AS ENUM (
     'project_user',
     'project_admin'
@@ -85,6 +126,31 @@ CREATE TYPE "public"."project_role_enum" AS ENUM (
 
 
 ALTER TYPE "public"."project_role_enum" OWNER TO "postgres";
+
+
+CREATE TYPE "public"."review_state" AS ENUM (
+    'to_review',
+    'reviewed'
+);
+
+
+ALTER TYPE "public"."review_state" OWNER TO "postgres";
+
+
+COMMENT ON TYPE "public"."review_state" IS 'Review state of a document (overall) and of one reviewer on it.';
+
+
+
+CREATE TYPE "public"."zone_shape" AS ENUM (
+    'poly'
+);
+
+
+ALTER TYPE "public"."zone_shape" OWNER TO "postgres";
+
+
+COMMENT ON TYPE "public"."zone_shape" IS 'Shape of a zone drawn on a plan.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."check_snag_lot_project"() RETURNS "trigger"
@@ -141,7 +207,7 @@ CREATE OR REPLACE FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_
 begin
   insert into public.v2_records (
     id, short_id, project_id, target_type, building_id, plan_id, pos_x, pos_y,
-    document_id, metadata, description, theme_name, phase_name, author_id, details,
+    document_id, description, theme_name, phase_name, author_id, details,
     created_at, observed_at
   ) values (
     p_id,
@@ -153,7 +219,6 @@ begin
     p_plan_id,
     p_pos_x,
     p_pos_y,
-    null,
     null,
     p_description,
     p_theme_name,
@@ -199,13 +264,6 @@ begin
 
   delete from public.v2_record_users where user_id = p_user_id;
   delete from public.doc_to_review_state where user_id = p_user_id and state <> 'reviewed';
-  update public.doc_to_review d
-  set assigned_users = array_remove(d.assigned_users, p_user_id::text)
-  where p_user_id::text = any (d.assigned_users)
-    and not exists (
-      select 1 from public.doc_to_review_state s
-      where s.doc_to_review_id = d.id and s.user_id = p_user_id and s.state = 'reviewed'
-    );
 end;
 $$;
 
@@ -225,6 +283,65 @@ $$;
 
 
 ALTER FUNCTION "public"."default_document_read_only"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."default_record_phase_name"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+declare
+  v_code text;
+  v_name_written boolean;
+  v_code_written boolean;
+begin
+  if tg_op = 'INSERT' then
+    v_name_written := new.phase_name is not null;
+    v_code_written := new.phase_code is not null;
+  else
+    v_name_written := new.phase_name is distinct from old.phase_name;
+    v_code_written := new.phase_code is distinct from old.phase_code;
+  end if;
+
+  -- 1. The phase this write carries, as a code: the code wins over the name (an old front, or an
+  --    entry it queued offline, sends the name only). Unknown to the catalogue: none.
+  if v_code_written then
+    select ph.code into v_code from public.phases ph where ph.code = new.phase_code;
+  elsif v_name_written then
+    select ph.code into v_code
+    from public.phases ph
+    where ph.name = btrim(new.phase_name)
+    order by ph.code = btrim(new.phase_name) desc, ph.code
+    limit 1;
+  elsif new.phase_code is not null or new.phase_name is not null then
+    -- Neither written (the same phase sent back): the record keeps its phase.
+    return new;
+  end if;
+
+  -- 2. None, or not one of the project's phases: the project's active phase (NULL if it has none).
+  --    A project with no phase row at all is not checked.
+  if v_code is null
+    or (
+      exists (select 1 from public.project_phases pp where pp.project_id = new.project_id)
+      and not exists (
+        select 1
+        from public.project_phases pp
+        join public.phases ph on ph.id = pp.phase_id
+        where pp.project_id = new.project_id and ph.code = v_code
+      )
+    )
+  then
+    select p.current_phase_code into v_code from public.projects p where p.id = new.project_id;
+  end if;
+
+  -- 3. Both columns from the code.
+  new.phase_code := v_code;
+  new.phase_name := (select ph.name from public.phases ph where ph.code = v_code);
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."default_record_phase_name"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."document_has_foreign_contribution"("p_document_id" "uuid") RETURNS boolean
@@ -425,27 +542,19 @@ ALTER FUNCTION "public"."get_my_project_role"("p_id" "uuid") OWNER TO "postgres"
 CREATE OR REPLACE FUNCTION "public"."handle_new_project"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public'
-    AS $$                                                                              
-    BEGIN                                                                              
-      INSERT INTO public.project_members (                                             
-        project_id,                                                                    
-        user_id,                                                                       
-        invitation_email,                                                              
-        status,                                                                        
-        project_role,                                                                  
-        role 
-      )                                                                                
-      VALUES (                                                                         
-        NEW.id,                                                                        
-        COALESCE(NEW.created_by, auth.uid()),                                          
-        (SELECT email FROM auth.users WHERE id = COALESCE(NEW.created_by, auth.uid())),
-        'accepted',                                                                    
-        'project_admin',                                                               
-        NULL                                                                           
-      );                                                                               
-      RETURN NEW;                                                                      
-    END;                                                                               
-    $$;
+    AS $$
+begin
+  insert into public.project_members (project_id, user_id, invitation_email, status, project_role)
+  values (
+    new.id,
+    coalesce(new.created_by, auth.uid()),
+    (select email from auth.users where id = coalesce(new.created_by, auth.uid())),
+    'accepted',
+    'project_admin'
+  );
+  return new;
+end;
+$$;
 
 
 ALTER FUNCTION "public"."handle_new_project"() OWNER TO "postgres";
@@ -481,8 +590,8 @@ BEGIN
     SET
       user_id = NEW.id,
       status = CASE
-        WHEN NEW.confirmed_at IS NOT NULL THEN 'accepted'
-        ELSE 'pending'
+        WHEN NEW.confirmed_at IS NOT NULL THEN 'accepted'::public.membership_status
+        ELSE 'pending'::public.membership_status
       END
     WHERE invitation_email = NEW.email
       AND user_id IS NULL;
@@ -764,46 +873,32 @@ CREATE OR REPLACE FUNCTION "public"."require_accepted_member"() RETURNS "trigger
     AS $$
 declare
   v_project uuid;
-  v_designated text[];
 begin
   if auth.uid() is null then
     return new;
   end if;
 
-  if tg_table_name = 'doc_to_review' then
-    v_project := new.project_id;
-    v_designated := coalesce(new.assigned_users, '{}');
-    if tg_op = 'UPDATE' then
-      v_designated := array(
-        select d from unnest(v_designated) as d
-        where array_position(coalesce(old.assigned_users, '{}'), d) is null
-      );
-    end if;
-  elsif tg_table_name = 'doc_to_review_state' then
+  if tg_table_name = 'doc_to_review_state' then
     select project_id into v_project from public.doc_to_review where id = new.doc_to_review_id;
-    v_designated := array[new.user_id::text];
-  else
+  elsif tg_table_name = 'v2_record_users' then
     if tg_op = 'UPDATE' and new.user_id is not distinct from old.user_id then
       return new;
     end if;
     select project_id into v_project from public.v2_records where id = new.record_id;
-    v_designated := array[new.user_id::text];
+  else
+    raise exception 'require_accepted_member does not handle table %', tg_table_name;
   end if;
 
   if v_project is null then
     return new;
   end if;
 
-  if exists (
+  if not exists (
     select 1
-    from unnest(v_designated) as d
-    where not exists (
-      select 1
-      from public.project_members pm
-      where pm.project_id = v_project
-        and pm.user_id::text = d
-        and pm.status = 'accepted'
-    )
+    from public.project_members pm
+    where pm.project_id = v_project
+      and pm.user_id = new.user_id
+      and pm.status = 'accepted'
   ) then
     raise exception 'Only an accepted member of the project can be designated on its documents and records'
       using errcode = '23514';
@@ -868,6 +963,21 @@ $$;
 
 
 ALTER FUNCTION "public"."rls_auto_enable"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."set_project_phase_code"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  -- Always the code of phase_id, whatever was sent.
+  select ph.code into new.phase_code from public.phases ph where ph.id = new.phase_id;
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."set_project_phase_code"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."set_record_scope_number"() RETURNS "trigger"
@@ -985,6 +1095,76 @@ $_$;
 
 
 ALTER FUNCTION "public"."storage_object_project_id"("p_name" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."sync_phase_code"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+declare
+  v_name text;
+  v_code text;
+  v_name_written boolean;
+  v_code_written boolean;
+begin
+  -- Nested on the table: only projects has current_phase_*, only doc_to_review has phase_*.
+  if tg_table_name = 'projects' then
+    v_name := new.current_phase_name;
+    v_code := new.current_phase_code;
+    if tg_op = 'UPDATE' then
+      v_name_written := v_name is distinct from old.current_phase_name;
+      v_code_written := v_code is distinct from old.current_phase_code;
+    end if;
+  else
+    v_name := new.phase_name;
+    v_code := new.phase_code;
+    if tg_op = 'UPDATE' then
+      v_name_written := v_name is distinct from old.phase_name;
+      v_code_written := v_code is distinct from old.phase_code;
+    end if;
+  end if;
+  if tg_op = 'INSERT' then
+    v_name_written := v_name is not null;
+    v_code_written := v_code is not null;
+  end if;
+
+  if v_code_written then
+    -- The code wins. An unknown code is left to the foreign key, which refuses it (23503).
+    select ph.name into v_name from public.phases ph where ph.code = v_code;
+  elsif v_name_written then
+    if v_name is null or btrim(v_name) = '' then
+      -- No phase. A blank name is kept as written: the fronts in use upload and list the documents
+      -- of a project without an active phase under phase_name = ''.
+      v_code := null;
+    else
+      -- phases.name is not unique: prefer the phase whose code is that name.
+      select ph.code into v_code
+      from public.phases ph
+      where ph.name = btrim(v_name)
+      order by ph.code = btrim(v_name) desc, ph.code
+      limit 1;
+      if v_code is null then
+        raise exception 'Unknown phase "%"', v_name using errcode = '23503';
+      end if;
+      select ph.name into v_name from public.phases ph where ph.code = v_code;
+    end if;
+  else
+    return new;
+  end if;
+
+  if tg_table_name = 'projects' then
+    new.current_phase_name := v_name;
+    new.current_phase_code := v_code;
+  else
+    new.phase_name := v_name;
+    new.phase_code := v_code;
+  end if;
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."sync_phase_code"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."unreferenced_storage_objects"("p_min_age" interval DEFAULT '1 day'::interval) RETURNS TABLE("name" "text", "created_at" timestamp with time zone, "size" bigint)
@@ -1427,12 +1607,12 @@ ALTER TABLE "migration_staging"."zones_plan" OWNER TO "postgres";
 
 CREATE TABLE IF NOT EXISTS "public"."building_plans" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "building_id" "uuid",
+    "building_id" "uuid" NOT NULL,
     "name" "text",
     "image_url" "text",
     "created_by" "uuid",
     "updated_by" "uuid",
-    "type" "text",
+    "type" "public"."plan_type",
     "sort_order" bigint,
     "tool" "text" NOT NULL,
     CONSTRAINT "building_plans_tool_check" CHECK (("tool" = ANY (ARRAY['diag'::"text", 'recept'::"text"])))
@@ -1527,12 +1707,12 @@ CREATE TABLE IF NOT EXISTS "public"."doc_to_review" (
     "doc_link" "text" NOT NULL,
     "phase_name" "text",
     "project_id" "uuid" NOT NULL,
-    "assigned_users" "text"[],
-    "review_state" "text" DEFAULT 'to_review'::"text" NOT NULL,
+    "review_state" "public"."review_state" DEFAULT 'to_review'::"public"."review_state" NOT NULL,
     "read_only" boolean DEFAULT false NOT NULL,
     "is_external_upload" boolean DEFAULT false,
     "deadline" "date",
-    "foreign_contribution_at" timestamp with time zone
+    "foreign_contribution_at" timestamp with time zone,
+    "phase_code" "text"
 );
 
 
@@ -1543,11 +1723,15 @@ COMMENT ON COLUMN "public"."doc_to_review"."foreign_contribution_at" IS 'When so
 
 
 
+COMMENT ON COLUMN "public"."doc_to_review"."phase_code" IS 'Phase of the document (phases.code). Kept in step with phase_name until the contraction (#371).';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."doc_to_review_state" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "doc_to_review_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "state" "text" NOT NULL,
+    "state" "public"."review_state" NOT NULL,
     "updated_at" timestamp without time zone NOT NULL
 );
 
@@ -1559,11 +1743,22 @@ CREATE TABLE IF NOT EXISTS "public"."phases" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "name" "text",
     "sort_order" real,
-    "type" "text"
+    "type" "text",
+    "code" "text" NOT NULL,
+    "category" "public"."phase_category",
+    CONSTRAINT "phases_code_not_blank" CHECK (("btrim"("code") <> ''::"text"))
 );
 
 
 ALTER TABLE "public"."phases" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."phases"."code" IS 'Key of the phase, referenced by records, documents, projects and project phases. Never changes: it is also in storage paths.';
+
+
+
+COMMENT ON COLUMN "public"."phases"."category" IS 'Group of the phase in the project form; NULL for NO_PHASE. Replaces the French label in phases.type.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."profiles" (
@@ -1633,26 +1828,36 @@ CREATE TABLE IF NOT EXISTS "public"."project_members" (
     "project_id" "uuid" NOT NULL,
     "user_id" "uuid",
     "invitation_email" "text" NOT NULL,
-    "status" "text" DEFAULT 'pending'::"text",
-    "role" "text",
+    "status" "public"."membership_status" DEFAULT 'pending'::"public"."membership_status" NOT NULL,
     "project_role" "public"."project_role_enum" DEFAULT 'project_user'::"public"."project_role_enum",
     "invitation_token_hash" "text",
-    "invitation_expires_at" timestamp with time zone
+    "invitation_expires_at" timestamp with time zone,
+    "job_title" "text"
 );
 
 
 ALTER TABLE "public"."project_members" OWNER TO "postgres";
 
 
+COMMENT ON COLUMN "public"."project_members"."job_title" IS 'The member''s job title on this project ("Architecte", "BET Fluides"…), free text, for display only: it carries no privilege (project_role does).';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."project_phases" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "project_id" "uuid" NOT NULL,
     "sort_order" integer DEFAULT 0 NOT NULL,
-    "phase_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL
+    "phase_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "phase_code" "text",
+    CONSTRAINT "project_phases_phase_code_present" CHECK (("phase_code" IS NOT NULL))
 );
 
 
 ALTER TABLE "public"."project_phases" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."project_phases"."phase_code" IS 'Code of phase_id (phases.code), set by a trigger: the key the project''s records and documents will reference (#371).';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."projects" (
@@ -1669,6 +1874,7 @@ CREATE TABLE IF NOT EXISTS "public"."projects" (
     "latitude" double precision,
     "longitude" double precision,
     "short_id" "text" DEFAULT "public"."generate_short_id"('p'::"text") NOT NULL,
+    "current_phase_code" "text",
     CONSTRAINT "projects_short_id_format_check" CHECK (("short_id" ~ '^p[0-9]{7}$'::"text"))
 );
 
@@ -1701,6 +1907,10 @@ COMMENT ON COLUMN "public"."projects"."description" IS 'Description du projet';
 
 
 COMMENT ON COLUMN "public"."projects"."created_at" IS 'Date de création du projet';
+
+
+
+COMMENT ON COLUMN "public"."projects"."current_phase_code" IS 'Active phase of the project (phases.code). Kept in step with current_phase_name until the contraction (#371).';
 
 
 
@@ -1891,15 +2101,18 @@ CREATE TABLE IF NOT EXISTS "public"."v2_records" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "document_id" "uuid",
     "metadata" "jsonb" DEFAULT '{}'::"jsonb",
-    "phase_name" "text" DEFAULT ''::"text",
+    "phase_name" "text",
     "details" "jsonb" DEFAULT '{}'::"jsonb",
     "short_id" "text" DEFAULT "public"."generate_short_id"('r'::"text") NOT NULL,
     "scope_number" integer,
     "observed_at" timestamp with time zone DEFAULT "now"(),
+    "phase_code" "text",
+    CONSTRAINT "v2_records_phase_name_not_blank" CHECK (("btrim"("phase_name") <> ''::"text")),
     CONSTRAINT "v2_records_plan_needs_building" CHECK ((("plan_id" IS NULL) OR ("building_id" IS NOT NULL))),
     CONSTRAINT "v2_records_project_id_present" CHECK (("project_id" IS NOT NULL)),
     CONSTRAINT "v2_records_scope_number_positive_check" CHECK ((("scope_number" IS NULL) OR ("scope_number" > 0))),
-    CONSTRAINT "v2_records_short_id_format_check" CHECK (("short_id" ~ '^r[0-9]{7}$'::"text"))
+    CONSTRAINT "v2_records_short_id_format_check" CHECK (("short_id" ~ '^r[0-9]{7}$'::"text")),
+    CONSTRAINT "v2_records_target_type_check" CHECK (("target_type" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text", 'building_snag'::"text"])))
 );
 
 
@@ -1907,6 +2120,10 @@ ALTER TABLE "public"."v2_records" OWNER TO "postgres";
 
 
 COMMENT ON COLUMN "public"."v2_records"."observed_at" IS 'When the point was observed on site, set by the device at capture time and editable (day only) for reception on desktop. created_at stays the technical date. Tools that do not set it get now() from the default.';
+
+
+
+COMMENT ON COLUMN "public"."v2_records"."phase_code" IS 'Phase the record was captured in (phases.code). Kept in step with phase_name until the contraction (#371).';
 
 
 
@@ -1922,7 +2139,7 @@ ALTER TABLE "public"."v2_themes" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."zones_plan" (
-    "type" "text" DEFAULT 'poly'::"text" NOT NULL,
+    "type" "public"."zone_shape" DEFAULT 'poly'::"public"."zone_shape" NOT NULL,
     "title" "text" NOT NULL,
     "points" "jsonb" NOT NULL,
     "plan_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
@@ -1995,7 +2212,17 @@ ALTER TABLE ONLY "public"."doc_to_review"
 
 
 ALTER TABLE ONLY "public"."doc_to_review_state"
+    ADD CONSTRAINT "doc_to_review_state_document_user_key" UNIQUE ("doc_to_review_id", "user_id");
+
+
+
+ALTER TABLE ONLY "public"."doc_to_review_state"
     ADD CONSTRAINT "doc_to_review_state_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."phases"
+    ADD CONSTRAINT "phases_code_key" UNIQUE ("code");
 
 
 
@@ -2041,6 +2268,16 @@ ALTER TABLE ONLY "public"."project_members"
 
 ALTER TABLE ONLY "public"."project_phases"
     ADD CONSTRAINT "project_phases_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."project_phases"
+    ADD CONSTRAINT "project_phases_project_id_phase_code_key" UNIQUE ("project_id", "phase_code");
+
+
+
+ALTER TABLE ONLY "public"."project_phases"
+    ADD CONSTRAINT "project_phases_project_id_phase_id_key" UNIQUE ("project_id", "phase_id");
 
 
 
@@ -2139,11 +2376,6 @@ ALTER TABLE ONLY "public"."v2_records"
 
 
 
-ALTER TABLE "public"."v2_records"
-    ADD CONSTRAINT "v2_records_target_type_check" CHECK (("target_type" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text", 'building_snag'::"text"]))) NOT VALID;
-
-
-
 ALTER TABLE "public"."v2_themes"
     ADD CONSTRAINT "v2_themes_applicable_to_check" CHECK (("applicable_to" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text"]))) NOT VALID;
 
@@ -2200,6 +2432,10 @@ CREATE INDEX "v2_releves_projet_id_idx" ON "public"."v2_records" USING "btree" (
 
 
 CREATE OR REPLACE TRIGGER "default_document_read_only" BEFORE INSERT OR UPDATE ON "public"."doc_to_review" FOR EACH ROW EXECUTE FUNCTION "public"."default_document_read_only"();
+
+
+
+CREATE OR REPLACE TRIGGER "default_record_phase_name" BEFORE INSERT OR UPDATE OF "phase_name", "phase_code" ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."default_record_phase_name"();
 
 
 
@@ -2291,10 +2527,6 @@ CREATE OR REPLACE TRIGGER "queue_storage_purge" AFTER DELETE OR UPDATE OF "metad
 
 
 
-CREATE OR REPLACE TRIGGER "require_accepted_member" BEFORE INSERT OR UPDATE OF "assigned_users" ON "public"."doc_to_review" FOR EACH ROW EXECUTE FUNCTION "public"."require_accepted_member"();
-
-
-
 CREATE OR REPLACE TRIGGER "require_accepted_member" BEFORE INSERT ON "public"."doc_to_review_state" FOR EACH ROW EXECUTE FUNCTION "public"."require_accepted_member"();
 
 
@@ -2308,6 +2540,10 @@ CREATE OR REPLACE TRIGGER "reset_document_review_state_on_insert_or_delete" AFTE
 
 
 CREATE OR REPLACE TRIGGER "reset_document_review_state_on_update" AFTER UPDATE ON "public"."v2_records" FOR EACH ROW WHEN (("old".* IS DISTINCT FROM "new".*)) EXECUTE FUNCTION "public"."reset_document_review_state"();
+
+
+
+CREATE OR REPLACE TRIGGER "set_project_phase_code" BEFORE INSERT OR UPDATE OF "phase_id", "phase_code" ON "public"."project_phases" FOR EACH ROW EXECUTE FUNCTION "public"."set_project_phase_code"();
 
 
 
@@ -2343,6 +2579,14 @@ CREATE OR REPLACE TRIGGER "stamp_document_contribution" AFTER INSERT ON "public"
 
 
 
+CREATE OR REPLACE TRIGGER "sync_phase_code" BEFORE INSERT OR UPDATE OF "phase_name", "phase_code" ON "public"."doc_to_review" FOR EACH ROW EXECUTE FUNCTION "public"."sync_phase_code"();
+
+
+
+CREATE OR REPLACE TRIGGER "sync_phase_code" BEFORE INSERT OR UPDATE OF "current_phase_name", "current_phase_code" ON "public"."projects" FOR EACH ROW EXECUTE FUNCTION "public"."sync_phase_code"();
+
+
+
 CREATE OR REPLACE TRIGGER "trigger_preserve_record_scope_number" BEFORE UPDATE ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."preserve_record_scope_number"();
 
 
@@ -2367,6 +2611,11 @@ ALTER TABLE ONLY "public"."buildings"
 
 ALTER TABLE ONLY "public"."buildings"
     ADD CONSTRAINT "buildings_site_in_project_fkey" FOREIGN KEY ("site_id", "project_id") REFERENCES "public"."sites"("id", "project_id") ON DELETE CASCADE DEFERRABLE;
+
+
+
+ALTER TABLE ONLY "public"."doc_to_review"
+    ADD CONSTRAINT "doc_to_review_phase_code_fkey" FOREIGN KEY ("phase_code") REFERENCES "public"."phases"("code") ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 
 
@@ -2432,6 +2681,11 @@ ALTER TABLE ONLY "public"."project_phases"
 
 ALTER TABLE ONLY "public"."projects"
     ADD CONSTRAINT "projects_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id") ON UPDATE CASCADE ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."projects"
+    ADD CONSTRAINT "projects_current_phase_code_fkey" FOREIGN KEY ("current_phase_code") REFERENCES "public"."phases"("code") ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 
 
@@ -2517,6 +2771,11 @@ ALTER TABLE ONLY "public"."v2_records"
 
 ALTER TABLE ONLY "public"."v2_records"
     ADD CONSTRAINT "v2_records_document_in_project_fkey" FOREIGN KEY ("document_id", "project_id") REFERENCES "public"."doc_to_review"("id", "project_id") ON DELETE CASCADE DEFERRABLE;
+
+
+
+ALTER TABLE ONLY "public"."v2_records"
+    ADD CONSTRAINT "v2_records_phase_code_fkey" FOREIGN KEY ("phase_code") REFERENCES "public"."phases"("code") ON UPDATE RESTRICT ON DELETE RESTRICT;
 
 
 
@@ -2822,7 +3081,7 @@ CREATE POLICY "Review states - Assign by document owner, project_admin or kutx" 
    FROM "public"."doc_to_review"
   WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id")) = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
            FROM "public"."doc_to_review"
-          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL))) AND (("state" = 'to_review'::"text") OR ("user_id" = ( SELECT "auth"."uid"() AS "uid"))))));
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL))) AND (("state" = 'to_review'::"public"."review_state") OR ("user_id" = ( SELECT "auth"."uid"() AS "uid"))))));
 
 
 
@@ -2854,7 +3113,7 @@ CREATE POLICY "Review states - Update by document owner, project_admin, own re" 
    FROM "public"."doc_to_review"
   WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id")) = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
            FROM "public"."doc_to_review"
-          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL)) OR (("user_id" = ( SELECT "auth"."uid"() AS "uid")) AND ("state" = 'reviewed'::"text") AND (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL)) OR (("user_id" = ( SELECT "auth"."uid"() AS "uid")) AND ("state" = 'reviewed'::"public"."review_state") AND (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
            FROM "public"."doc_to_review"
           WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL))));
 
@@ -3282,6 +3541,11 @@ GRANT ALL ON FUNCTION "public"."default_document_read_only"() TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "public"."default_record_phase_name"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."default_record_phase_name"() TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."document_has_foreign_contribution"("p_document_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."document_has_foreign_contribution"("p_document_id" "uuid") TO "service_role";
 GRANT ALL ON FUNCTION "public"."document_has_foreign_contribution"("p_document_id" "uuid") TO "authenticated";
@@ -3408,6 +3672,11 @@ GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "public"."set_project_phase_code"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."set_project_phase_code"() TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."set_record_scope_number"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."set_record_scope_number"() TO "service_role";
 
@@ -3436,6 +3705,11 @@ GRANT ALL ON FUNCTION "public"."storage_object_name"("p_ref" "text") TO "service
 REVOKE ALL ON FUNCTION "public"."storage_object_project_id"("p_name" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."storage_object_project_id"("p_name" "text") TO "service_role";
 GRANT ALL ON FUNCTION "public"."storage_object_project_id"("p_name" "text") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."sync_phase_code"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."sync_phase_code"() TO "service_role";
 
 
 
