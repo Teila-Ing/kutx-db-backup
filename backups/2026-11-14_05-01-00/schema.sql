@@ -78,6 +78,47 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions";
 
 
 
+CREATE TYPE "public"."membership_status" AS ENUM (
+    'pending',
+    'accepted'
+);
+
+
+ALTER TYPE "public"."membership_status" OWNER TO "postgres";
+
+
+COMMENT ON TYPE "public"."membership_status" IS 'Project membership: invited (pending) or accepted.';
+
+
+
+CREATE TYPE "public"."phase_category" AS ENUM (
+    'prog_diag',
+    'design',
+    'works'
+);
+
+
+ALTER TYPE "public"."phase_category" OWNER TO "postgres";
+
+
+COMMENT ON TYPE "public"."phase_category" IS 'Group of a phase: programming and diagnosis, design, or works.';
+
+
+
+CREATE TYPE "public"."plan_type" AS ENUM (
+    'floor',
+    'facade',
+    'site_plan'
+);
+
+
+ALTER TYPE "public"."plan_type" OWNER TO "postgres";
+
+
+COMMENT ON TYPE "public"."plan_type" IS 'Kind of building plan: floor, facade or site plan.';
+
+
+
 CREATE TYPE "public"."project_role_enum" AS ENUM (
     'project_user',
     'project_admin'
@@ -85,6 +126,31 @@ CREATE TYPE "public"."project_role_enum" AS ENUM (
 
 
 ALTER TYPE "public"."project_role_enum" OWNER TO "postgres";
+
+
+CREATE TYPE "public"."review_state" AS ENUM (
+    'to_review',
+    'reviewed'
+);
+
+
+ALTER TYPE "public"."review_state" OWNER TO "postgres";
+
+
+COMMENT ON TYPE "public"."review_state" IS 'Review state of a document (overall) and of one reviewer on it.';
+
+
+
+CREATE TYPE "public"."zone_shape" AS ENUM (
+    'poly'
+);
+
+
+ALTER TYPE "public"."zone_shape" OWNER TO "postgres";
+
+
+COMMENT ON TYPE "public"."zone_shape" IS 'Shape of a zone drawn on a plan.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."check_snag_lot_project"() RETURNS "trigger"
@@ -134,14 +200,14 @@ $$;
 ALTER FUNCTION "public"."claim_storage_purge"("p_limit" integer) OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text" DEFAULT NULL::"text", "p_building_id" "uuid" DEFAULT NULL::"uuid", "p_plan_id" "uuid" DEFAULT NULL::"uuid", "p_pos_x" double precision DEFAULT NULL::double precision, "p_pos_y" double precision DEFAULT NULL::double precision, "p_phase_name" "text" DEFAULT NULL::"text", "p_author_id" "uuid" DEFAULT NULL::"uuid", "p_details" "jsonb" DEFAULT NULL::"jsonb", "p_created_at" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_status" "text" DEFAULT NULL::"text", "p_contractor" "text" DEFAULT NULL::"text", "p_due_date" "date" DEFAULT NULL::"date", "p_observed_at" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_lot_id" "uuid" DEFAULT NULL::"uuid") RETURNS TABLE("scope_number" integer)
+CREATE OR REPLACE FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text" DEFAULT NULL::"text", "p_building_id" "uuid" DEFAULT NULL::"uuid", "p_plan_id" "uuid" DEFAULT NULL::"uuid", "p_pos_x" double precision DEFAULT NULL::double precision, "p_pos_y" double precision DEFAULT NULL::double precision, "p_phase_code" "text" DEFAULT NULL::"text", "p_author_id" "uuid" DEFAULT NULL::"uuid", "p_details" "jsonb" DEFAULT NULL::"jsonb", "p_created_at" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_status" "text" DEFAULT NULL::"text", "p_contractor" "text" DEFAULT NULL::"text", "p_due_date" "date" DEFAULT NULL::"date", "p_observed_at" timestamp with time zone DEFAULT NULL::timestamp with time zone, "p_lot_id" "uuid" DEFAULT NULL::"uuid", "p_phase_name" "text" DEFAULT NULL::"text") RETURNS TABLE("scope_number" integer)
     LANGUAGE "plpgsql"
     SET "search_path" TO 'public'
     AS $$
 begin
   insert into public.v2_records (
     id, short_id, project_id, target_type, building_id, plan_id, pos_x, pos_y,
-    document_id, metadata, description, theme_name, phase_name, author_id, details,
+    document_id, description, theme_name, phase_code, author_id, details,
     created_at, observed_at
   ) values (
     p_id,
@@ -154,10 +220,10 @@ begin
     p_pos_x,
     p_pos_y,
     null,
-    null,
     p_description,
     p_theme_name,
-    p_phase_name,
+    -- p_phase_name: the front of #380 sends the code under that name (a code is its phase's name).
+    coalesce(p_phase_code, p_phase_name),
     p_author_id,
     p_details,
     coalesce(p_created_at, now()),
@@ -172,7 +238,7 @@ end;
 $$;
 
 
-ALTER FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") OWNER TO "postgres";
+ALTER FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_code" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid", "p_phase_name" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."deactivate_account"("p_user_id" "uuid", "p_anonymised_email" "text") RETURNS "void"
@@ -220,22 +286,35 @@ $$;
 ALTER FUNCTION "public"."default_document_read_only"() OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."default_record_phase_name"() RETURNS "trigger"
+CREATE OR REPLACE FUNCTION "public"."default_record_phase_code"() RETURNS "trigger"
     LANGUAGE "plpgsql"
     SET "search_path" TO 'public'
     AS $$
+declare
+  v_code text;
 begin
-  if new.phase_name is null or btrim(new.phase_name) = '' then
-    select nullif(btrim(p.current_phase_name), '') into new.phase_name
-    from public.projects p
-    where p.id = new.project_id;
+  if tg_op = 'UPDATE' and new.phase_code is not distinct from old.phase_code
+     and new.phase_code is not null then
+    -- The same phase sent back: the record keeps it.
+    return new;
   end if;
+
+  -- The phase written, if it is one of the project's phases; otherwise (missing, unknown to the
+  -- catalogue, or not the project's) the project's active phase, NULL if it has none.
+  select pp.phase_code into v_code
+  from public.project_phases pp
+  where pp.project_id = new.project_id and pp.phase_code = new.phase_code;
+  if v_code is null then
+    select p.current_phase_code into v_code from public.projects p where p.id = new.project_id;
+  end if;
+
+  new.phase_code := v_code;
   return new;
 end;
 $$;
 
 
-ALTER FUNCTION "public"."default_record_phase_name"() OWNER TO "postgres";
+ALTER FUNCTION "public"."default_record_phase_code"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."document_has_foreign_contribution"("p_document_id" "uuid") RETURNS boolean
@@ -484,8 +563,8 @@ BEGIN
     SET
       user_id = NEW.id,
       status = CASE
-        WHEN NEW.confirmed_at IS NOT NULL THEN 'accepted'
-        ELSE 'pending'
+        WHEN NEW.confirmed_at IS NOT NULL THEN 'accepted'::public.membership_status
+        ELSE 'pending'::public.membership_status
       END
     WHERE invitation_email = NEW.email
       AND user_id IS NULL;
@@ -857,6 +936,21 @@ $$;
 
 
 ALTER FUNCTION "public"."rls_auto_enable"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."set_project_phase_code"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public'
+    AS $$
+begin
+  -- Always the code of phase_id, whatever was sent.
+  select ph.code into new.phase_code from public.phases ph where ph.id = new.phase_id;
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."set_project_phase_code"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."set_record_scope_number"() RETURNS "trigger"
@@ -1421,7 +1515,7 @@ CREATE TABLE IF NOT EXISTS "public"."building_plans" (
     "image_url" "text",
     "created_by" "uuid",
     "updated_by" "uuid",
-    "type" "text",
+    "type" "public"."plan_type",
     "sort_order" bigint,
     "tool" "text" NOT NULL,
     CONSTRAINT "building_plans_tool_check" CHECK (("tool" = ANY (ARRAY['diag'::"text", 'recept'::"text"])))
@@ -1514,13 +1608,13 @@ CREATE TABLE IF NOT EXISTS "public"."doc_to_review" (
     "uploaded_by" "uuid" NOT NULL,
     "doc_name" "text" NOT NULL,
     "doc_link" "text" NOT NULL,
-    "phase_name" "text",
     "project_id" "uuid" NOT NULL,
-    "review_state" "text" DEFAULT 'to_review'::"text" NOT NULL,
+    "review_state" "public"."review_state" DEFAULT 'to_review'::"public"."review_state" NOT NULL,
     "read_only" boolean DEFAULT false NOT NULL,
     "is_external_upload" boolean DEFAULT false,
     "deadline" "date",
-    "foreign_contribution_at" timestamp with time zone
+    "foreign_contribution_at" timestamp with time zone,
+    "phase_code" "text"
 );
 
 
@@ -1531,11 +1625,15 @@ COMMENT ON COLUMN "public"."doc_to_review"."foreign_contribution_at" IS 'When so
 
 
 
+COMMENT ON COLUMN "public"."doc_to_review"."phase_code" IS 'Phase of the document: one of its project''s phases (project_phases.phase_code), NULL for none.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."doc_to_review_state" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "doc_to_review_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
-    "state" "text" NOT NULL,
+    "state" "public"."review_state" NOT NULL,
     "updated_at" timestamp without time zone NOT NULL
 );
 
@@ -1547,11 +1645,21 @@ CREATE TABLE IF NOT EXISTS "public"."phases" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "name" "text",
     "sort_order" real,
-    "type" "text"
+    "code" "text" NOT NULL,
+    "category" "public"."phase_category",
+    CONSTRAINT "phases_code_not_blank" CHECK (("btrim"("code") <> ''::"text"))
 );
 
 
 ALTER TABLE "public"."phases" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."phases"."code" IS 'Key of the phase, referenced by records, documents, projects and project phases. Never changes: it is also in storage paths.';
+
+
+
+COMMENT ON COLUMN "public"."phases"."category" IS 'Group of the phase in the project form; NULL for NO_PHASE. Replaces the French label in phases.type.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."profiles" (
@@ -1621,7 +1729,7 @@ CREATE TABLE IF NOT EXISTS "public"."project_members" (
     "project_id" "uuid" NOT NULL,
     "user_id" "uuid",
     "invitation_email" "text" NOT NULL,
-    "status" "text" DEFAULT 'pending'::"text",
+    "status" "public"."membership_status" DEFAULT 'pending'::"public"."membership_status" NOT NULL,
     "project_role" "public"."project_role_enum" DEFAULT 'project_user'::"public"."project_role_enum",
     "invitation_token_hash" "text",
     "invitation_expires_at" timestamp with time zone,
@@ -1640,11 +1748,16 @@ CREATE TABLE IF NOT EXISTS "public"."project_phases" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "project_id" "uuid" NOT NULL,
     "sort_order" integer DEFAULT 0 NOT NULL,
-    "phase_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL
+    "phase_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "phase_code" "text" NOT NULL
 );
 
 
 ALTER TABLE "public"."project_phases" OWNER TO "postgres";
+
+
+COMMENT ON COLUMN "public"."project_phases"."phase_code" IS 'Code of phase_id (phases.code), set by a trigger: the key the project''s records, documents and active phase reference.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."projects" (
@@ -1657,10 +1770,10 @@ CREATE TABLE IF NOT EXISTS "public"."projects" (
     "created_by" "uuid",
     "updated_by" "uuid",
     "active" boolean DEFAULT true NOT NULL,
-    "current_phase_name" "text",
     "latitude" double precision,
     "longitude" double precision,
     "short_id" "text" DEFAULT "public"."generate_short_id"('p'::"text") NOT NULL,
+    "current_phase_code" "text",
     CONSTRAINT "projects_short_id_format_check" CHECK (("short_id" ~ '^p[0-9]{7}$'::"text"))
 );
 
@@ -1693,6 +1806,10 @@ COMMENT ON COLUMN "public"."projects"."description" IS 'Description du projet';
 
 
 COMMENT ON COLUMN "public"."projects"."created_at" IS 'Date de création du projet';
+
+
+
+COMMENT ON COLUMN "public"."projects"."current_phase_code" IS 'Active phase of the project: one of its phases (project_phases.phase_code), NULL for none.';
 
 
 
@@ -1883,16 +2000,16 @@ CREATE TABLE IF NOT EXISTS "public"."v2_records" (
     "updated_at" timestamp with time zone DEFAULT "now"(),
     "document_id" "uuid",
     "metadata" "jsonb" DEFAULT '{}'::"jsonb",
-    "phase_name" "text",
     "details" "jsonb" DEFAULT '{}'::"jsonb",
     "short_id" "text" DEFAULT "public"."generate_short_id"('r'::"text") NOT NULL,
     "scope_number" integer,
     "observed_at" timestamp with time zone DEFAULT "now"(),
-    CONSTRAINT "v2_records_phase_name_not_blank" CHECK (("btrim"("phase_name") <> ''::"text")),
+    "phase_code" "text",
     CONSTRAINT "v2_records_plan_needs_building" CHECK ((("plan_id" IS NULL) OR ("building_id" IS NOT NULL))),
     CONSTRAINT "v2_records_project_id_present" CHECK (("project_id" IS NOT NULL)),
     CONSTRAINT "v2_records_scope_number_positive_check" CHECK ((("scope_number" IS NULL) OR ("scope_number" > 0))),
-    CONSTRAINT "v2_records_short_id_format_check" CHECK (("short_id" ~ '^r[0-9]{7}$'::"text"))
+    CONSTRAINT "v2_records_short_id_format_check" CHECK (("short_id" ~ '^r[0-9]{7}$'::"text")),
+    CONSTRAINT "v2_records_target_type_check" CHECK (("target_type" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text", 'building_snag'::"text"])))
 );
 
 
@@ -1900,6 +2017,10 @@ ALTER TABLE "public"."v2_records" OWNER TO "postgres";
 
 
 COMMENT ON COLUMN "public"."v2_records"."observed_at" IS 'When the point was observed on site, set by the device at capture time and editable (day only) for reception on desktop. created_at stays the technical date. Tools that do not set it get now() from the default.';
+
+
+
+COMMENT ON COLUMN "public"."v2_records"."phase_code" IS 'Phase the record was captured in: one of its project''s phases (project_phases.phase_code), NULL if unknown.';
 
 
 
@@ -1915,7 +2036,7 @@ ALTER TABLE "public"."v2_themes" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."zones_plan" (
-    "type" "text" DEFAULT 'poly'::"text" NOT NULL,
+    "type" "public"."zone_shape" DEFAULT 'poly'::"public"."zone_shape" NOT NULL,
     "title" "text" NOT NULL,
     "points" "jsonb" NOT NULL,
     "plan_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
@@ -1998,6 +2119,11 @@ ALTER TABLE ONLY "public"."doc_to_review_state"
 
 
 ALTER TABLE ONLY "public"."phases"
+    ADD CONSTRAINT "phases_code_key" UNIQUE ("code");
+
+
+
+ALTER TABLE ONLY "public"."phases"
     ADD CONSTRAINT "phases_pkey" PRIMARY KEY ("id");
 
 
@@ -2039,6 +2165,16 @@ ALTER TABLE ONLY "public"."project_members"
 
 ALTER TABLE ONLY "public"."project_phases"
     ADD CONSTRAINT "project_phases_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."project_phases"
+    ADD CONSTRAINT "project_phases_project_id_phase_code_key" UNIQUE ("project_id", "phase_code");
+
+
+
+ALTER TABLE ONLY "public"."project_phases"
+    ADD CONSTRAINT "project_phases_project_id_phase_id_key" UNIQUE ("project_id", "phase_id");
 
 
 
@@ -2137,11 +2273,6 @@ ALTER TABLE ONLY "public"."v2_records"
 
 
 
-ALTER TABLE "public"."v2_records"
-    ADD CONSTRAINT "v2_records_target_type_check" CHECK (("target_type" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text", 'building_snag'::"text"]))) NOT VALID;
-
-
-
 ALTER TABLE "public"."v2_themes"
     ADD CONSTRAINT "v2_themes_applicable_to_check" CHECK (("applicable_to" = ANY (ARRAY['site'::"text", 'building'::"text", 'document'::"text"]))) NOT VALID;
 
@@ -2154,6 +2285,10 @@ ALTER TABLE ONLY "public"."v2_themes"
 
 ALTER TABLE ONLY "public"."zones_plan"
     ADD CONSTRAINT "zones_plan_pkey" PRIMARY KEY ("id");
+
+
+
+CREATE INDEX "doc_to_review_project_id_phase_code_idx" ON "public"."doc_to_review" USING "btree" ("project_id", "phase_code");
 
 
 
@@ -2189,6 +2324,10 @@ CREATE INDEX "v2_record_snags_lot_id_idx" ON "public"."v2_record_snags" USING "b
 
 
 
+CREATE INDEX "v2_records_project_id_phase_code_idx" ON "public"."v2_records" USING "btree" ("project_id", "phase_code");
+
+
+
 CREATE UNIQUE INDEX "v2_records_scope_number_key" ON "public"."v2_records" USING "btree" ("project_id", "public"."record_scope_key"("target_type", "document_id"), "scope_number");
 
 
@@ -2201,7 +2340,7 @@ CREATE OR REPLACE TRIGGER "default_document_read_only" BEFORE INSERT OR UPDATE O
 
 
 
-CREATE OR REPLACE TRIGGER "default_record_phase_name" BEFORE INSERT OR UPDATE OF "phase_name" ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."default_record_phase_name"();
+CREATE OR REPLACE TRIGGER "default_record_phase_code" BEFORE INSERT OR UPDATE OF "phase_code" ON "public"."v2_records" FOR EACH ROW EXECUTE FUNCTION "public"."default_record_phase_code"();
 
 
 
@@ -2309,6 +2448,10 @@ CREATE OR REPLACE TRIGGER "reset_document_review_state_on_update" AFTER UPDATE O
 
 
 
+CREATE OR REPLACE TRIGGER "set_project_phase_code" BEFORE INSERT OR UPDATE OF "phase_id", "phase_code" ON "public"."project_phases" FOR EACH ROW EXECUTE FUNCTION "public"."set_project_phase_code"();
+
+
+
 CREATE OR REPLACE TRIGGER "set_updated_by_building_plans" BEFORE UPDATE ON "public"."building_plans" FOR EACH ROW EXECUTE FUNCTION "public"."set_updated_by"();
 
 
@@ -2369,6 +2512,16 @@ ALTER TABLE ONLY "public"."buildings"
 
 
 ALTER TABLE ONLY "public"."doc_to_review"
+    ADD CONSTRAINT "doc_to_review_phase_code_fkey" FOREIGN KEY ("phase_code") REFERENCES "public"."phases"("code") ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "public"."doc_to_review"
+    ADD CONSTRAINT "doc_to_review_phase_in_project_fkey" FOREIGN KEY ("project_id", "phase_code") REFERENCES "public"."project_phases"("project_id", "phase_code");
+
+
+
+ALTER TABLE ONLY "public"."doc_to_review"
     ADD CONSTRAINT "doc_to_review_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON UPDATE CASCADE ON DELETE CASCADE;
 
 
@@ -2419,6 +2572,11 @@ ALTER TABLE ONLY "public"."project_members"
 
 
 ALTER TABLE ONLY "public"."project_phases"
+    ADD CONSTRAINT "project_phases_phase_code_fkey" FOREIGN KEY ("phase_code") REFERENCES "public"."phases"("code") ON UPDATE RESTRICT ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."project_phases"
     ADD CONSTRAINT "project_phases_phase_id_fkey" FOREIGN KEY ("phase_id") REFERENCES "public"."phases"("id") ON UPDATE CASCADE ON DELETE CASCADE;
 
 
@@ -2430,6 +2588,16 @@ ALTER TABLE ONLY "public"."project_phases"
 
 ALTER TABLE ONLY "public"."projects"
     ADD CONSTRAINT "projects_created_by_fkey" FOREIGN KEY ("created_by") REFERENCES "auth"."users"("id") ON UPDATE CASCADE ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."projects"
+    ADD CONSTRAINT "projects_current_phase_code_fkey" FOREIGN KEY ("current_phase_code") REFERENCES "public"."phases"("code") ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "public"."projects"
+    ADD CONSTRAINT "projects_current_phase_in_project_fkey" FOREIGN KEY ("id", "current_phase_code") REFERENCES "public"."project_phases"("project_id", "phase_code") ON DELETE SET NULL ("current_phase_code");
 
 
 
@@ -2515,6 +2683,16 @@ ALTER TABLE ONLY "public"."v2_records"
 
 ALTER TABLE ONLY "public"."v2_records"
     ADD CONSTRAINT "v2_records_document_in_project_fkey" FOREIGN KEY ("document_id", "project_id") REFERENCES "public"."doc_to_review"("id", "project_id") ON DELETE CASCADE DEFERRABLE;
+
+
+
+ALTER TABLE ONLY "public"."v2_records"
+    ADD CONSTRAINT "v2_records_phase_code_fkey" FOREIGN KEY ("phase_code") REFERENCES "public"."phases"("code") ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "public"."v2_records"
+    ADD CONSTRAINT "v2_records_phase_in_project_fkey" FOREIGN KEY ("project_id", "phase_code") REFERENCES "public"."project_phases"("project_id", "phase_code");
 
 
 
@@ -2820,7 +2998,7 @@ CREATE POLICY "Review states - Assign by document owner, project_admin or kutx" 
    FROM "public"."doc_to_review"
   WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id")) = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
            FROM "public"."doc_to_review"
-          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL))) AND (("state" = 'to_review'::"text") OR ("user_id" = ( SELECT "auth"."uid"() AS "uid"))))));
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL))) AND (("state" = 'to_review'::"public"."review_state") OR ("user_id" = ( SELECT "auth"."uid"() AS "uid"))))));
 
 
 
@@ -2852,7 +3030,7 @@ CREATE POLICY "Review states - Update by document owner, project_admin, own re" 
    FROM "public"."doc_to_review"
   WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id")) = ( SELECT "auth"."uid"() AS "uid")) AND (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
            FROM "public"."doc_to_review"
-          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL)) OR (("user_id" = ( SELECT "auth"."uid"() AS "uid")) AND ("state" = 'reviewed'::"text") AND (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
+          WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL)) OR (("user_id" = ( SELECT "auth"."uid"() AS "uid")) AND ("state" = 'reviewed'::"public"."review_state") AND (( SELECT "public"."get_my_project_role"(( SELECT "doc_to_review"."project_id"
            FROM "public"."doc_to_review"
           WHERE ("doc_to_review"."id" = "doc_to_review_state"."doc_to_review_id"))) AS "get_my_project_role") IS NOT NULL))));
 
@@ -3264,9 +3442,9 @@ GRANT ALL ON FUNCTION "public"."claim_storage_purge"("p_limit" integer) TO "serv
 
 
 
-REVOKE ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") TO "service_role";
-GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_name" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid") TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_code" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid", "p_phase_name" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_code" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid", "p_phase_name" "text") TO "service_role";
+GRANT ALL ON FUNCTION "public"."create_record_with_snag"("p_id" "uuid", "p_project_id" "uuid", "p_description" "text", "p_theme_name" "text", "p_short_id" "text", "p_building_id" "uuid", "p_plan_id" "uuid", "p_pos_x" double precision, "p_pos_y" double precision, "p_phase_code" "text", "p_author_id" "uuid", "p_details" "jsonb", "p_created_at" timestamp with time zone, "p_status" "text", "p_contractor" "text", "p_due_date" "date", "p_observed_at" timestamp with time zone, "p_lot_id" "uuid", "p_phase_name" "text") TO "authenticated";
 
 
 
@@ -3280,8 +3458,8 @@ GRANT ALL ON FUNCTION "public"."default_document_read_only"() TO "service_role";
 
 
 
-REVOKE ALL ON FUNCTION "public"."default_record_phase_name"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."default_record_phase_name"() TO "service_role";
+REVOKE ALL ON FUNCTION "public"."default_record_phase_code"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."default_record_phase_code"() TO "service_role";
 
 
 
@@ -3408,6 +3586,11 @@ GRANT ALL ON FUNCTION "public"."reset_document_review_state"() TO "service_role"
 
 REVOKE ALL ON FUNCTION "public"."rls_auto_enable"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."rls_auto_enable"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."set_project_phase_code"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."set_project_phase_code"() TO "service_role";
 
 
 
